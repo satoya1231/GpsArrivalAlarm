@@ -155,8 +155,11 @@ class MainActivity : ComponentActivity() {
 
         fun dismissArrival() {
             ArrivalAlertService.stop(this@MainActivity)
-            store.clearPendingArrival()
-            arrivalEvent = null
+            val nextArrival = store.clearPendingArrival()
+            arrivalEvent = nextArrival
+            if (nextArrival != null) {
+                ArrivalAlertCoordinator.activatePending(this@MainActivity, nextArrival)
+            }
         }
 
         LaunchedEffect(arrivalSignal) {
@@ -635,11 +638,22 @@ class MainActivity : ComponentActivity() {
         arrivalEvent?.let { event ->
             AlertDialog(
                 onDismissRequest = ::dismissArrival,
-                title = { Text("目的地に到着しました") },
+                title = {
+                    Text(
+                        if (event.isFinalDestination) "目的地に到着しました"
+                        else "経由駅に到着しました"
+                    )
+                },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("「${event.destinationName}」に到着しました。")
-                        Text("到着監視は自動的に停止しました。")
+                        Text(
+                            if (event.isFinalDestination) {
+                                "到着監視は自動的に停止しました。"
+                            } else {
+                                "次の経由駅と目的地の監視を続けます。"
+                            }
+                        )
                     }
                 },
                 confirmButton = {
@@ -860,7 +874,12 @@ class MainActivity : ComponentActivity() {
         var name by remember { mutableStateOf(initial?.name ?: "") }
         var latitude by remember { mutableStateOf(initial?.latitude?.toString() ?: "") }
         var longitude by remember { mutableStateOf(initial?.longitude?.toString() ?: "") }
-        var radius by remember { mutableStateOf(initial?.radiusMeters?.toInt()?.toString() ?: "1000") }
+        var radius by remember {
+            mutableStateOf(
+                initial?.radiusMeters?.toInt()?.toString()
+                    ?: DEFAULT_ARRIVAL_RADIUS_METERS.toInt().toString()
+            )
+        }
         var folder by remember {
             mutableStateOf(initial?.folder ?: initialFolder ?: NO_DESTINATION_FOLDER)
         }
@@ -1000,7 +1019,8 @@ class MainActivity : ComponentActivity() {
                     OutlinedButton(
                         onClick = {
                             waypoints = waypoints + WaypointDraft(
-                                System.currentTimeMillis(), "", "", "", "500", alertMethod
+                                System.currentTimeMillis(), "", "", "",
+                                DEFAULT_ARRIVAL_RADIUS_METERS.toInt().toString(), alertMethod
                             )
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -1106,6 +1126,7 @@ class MainActivity : ComponentActivity() {
                 MapPickerDialog(
                     initialLatitude = point.latitude.toDoubleOrNull(),
                     initialLongitude = point.longitude.toDoubleOrNull(),
+                    isWaypoint = true,
                     onDismiss = { waypointMapPickerIndex = null },
                     onSelected = { lat, lon, placeName ->
                         waypoints = waypoints.toMutableList().also {

@@ -35,21 +35,27 @@ class LocationMonitoringService : Service() {
         override fun onLocationResult(result: LocationResult) {
             val currentDestination = destination ?: return
             val location = result.lastLocation ?: return
-            currentDestination.waypoints.forEach { waypoint ->
-                if (waypoint.id in announcedWaypointIds) return@forEach
-                val waypointDistance = FloatArray(1)
-                Location.distanceBetween(
-                    location.latitude, location.longitude,
-                    waypoint.latitude, waypoint.longitude,
-                    waypointDistance
-                )
-                if (waypointDistance[0] <= waypoint.radiusMeters) {
-                    announcedWaypointIds += waypoint.id
-                    DestinationStore(this@LocationMonitoringService)
-                        .markWaypointAnnounced(currentDestination.id, waypoint.id)
-                    ArrivalAlertCoordinator.announceWaypoint(this@LocationMonitoringService, waypoint)
+            // 登録順を守り、まだ通過していない最初の経由駅だけを判定する。
+            // 後の駅の判定範囲が重なっていても、先に鳴らないようにする。
+            currentDestination.waypoints
+                .firstOrNull { it.id !in announcedWaypointIds }
+                ?.let { waypoint ->
+                    val waypointDistance = FloatArray(1)
+                    Location.distanceBetween(
+                        location.latitude, location.longitude,
+                        waypoint.latitude, waypoint.longitude,
+                        waypointDistance
+                    )
+                    if (waypointDistance[0] <= waypoint.radiusMeters) {
+                        announcedWaypointIds += waypoint.id
+                        DestinationStore(this@LocationMonitoringService)
+                            .markWaypointAnnounced(currentDestination.id, waypoint.id)
+                        ArrivalAlertCoordinator.announceWaypoint(
+                            this@LocationMonitoringService,
+                            waypoint
+                        )
+                    }
                 }
-            }
             val distance = FloatArray(1)
             Location.distanceBetween(
                 location.latitude,

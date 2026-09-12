@@ -15,27 +15,35 @@ import androidx.core.content.ContextCompat
 object ArrivalAlertCoordinator {
     fun announce(context: Context, destination: Destination) {
         val store = DestinationStore(context)
-        if (!store.savePendingArrival(destination)) return
-
-        val event = ArrivalEvent(destination.name, destination.arrivalAlertMethod)
-        ArrivalAlertService.start(context, event)
-        LocationMonitoringService.stop(context)
-        notifyArrival(context, destination.name, "目的地に到着しました")
-        context.sendBroadcast(
-            Intent(GeofenceBroadcastReceiver.ACTION_ARRIVAL)
-                .setPackage(context.packageName)
+        val event = ArrivalEvent(
+            destination.name,
+            destination.arrivalAlertMethod,
+            isFinalDestination = true,
+            id = destination.id
         )
+        val shouldAlertNow = store.savePendingArrival(destination)
+        LocationMonitoringService.stop(context)
+        if (shouldAlertNow) activatePending(context, event)
     }
 
     fun announceWaypoint(context: Context, waypoint: Waypoint) {
         val store = DestinationStore(context)
-        if (!store.savePendingArrival(waypoint)) return
-
-        ArrivalAlertService.start(
-            context,
-            ArrivalEvent(waypoint.name, waypoint.arrivalAlertMethod, false)
+        val event = ArrivalEvent(
+            waypoint.name,
+            waypoint.arrivalAlertMethod,
+            isFinalDestination = false,
+            id = waypoint.id
         )
-        notifyArrival(context, waypoint.name, "経由駅に到着しました")
+        if (store.savePendingArrival(waypoint)) activatePending(context, event)
+    }
+
+    fun activatePending(context: Context, event: ArrivalEvent) {
+        ArrivalAlertService.start(context, event)
+        notifyArrival(
+            context,
+            event.destinationName,
+            if (event.isFinalDestination) "目的地に到着しました" else "経由駅に到着しました"
+        )
         context.sendBroadcast(
             Intent(GeofenceBroadcastReceiver.ACTION_ARRIVAL).setPackage(context.packageName)
         )

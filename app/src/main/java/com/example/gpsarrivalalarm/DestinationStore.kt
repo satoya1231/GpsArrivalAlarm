@@ -48,7 +48,10 @@ class DestinationStore(context: Context) {
                                 name = point.getString("name"),
                                 latitude = point.getDouble("latitude"),
                                 longitude = point.getDouble("longitude"),
-                                radiusMeters = point.optDouble("radiusMeters", 500.0).toFloat(),
+                                radiusMeters = point.optDouble(
+                                    "radiusMeters",
+                                    DEFAULT_ARRIVAL_RADIUS_METERS.toDouble()
+                                ).toFloat(),
                                 arrivalAlertMethod = point.optString(
                                     "arrivalAlertMethod", ArrivalAlertMethod.VIBRATION.name
                                 ).let { runCatching { ArrivalAlertMethod.valueOf(it) }.getOrDefault(ArrivalAlertMethod.VIBRATION) }
@@ -175,44 +178,122 @@ class DestinationStore(context: Context) {
     }
 
     fun savePendingArrival(destination: Destination): Boolean {
-        return savePendingArrival(destination.id, destination.name, destination.arrivalAlertMethod, true)
+        return enqueuePendingArrival(
+            ArrivalEvent(
+                destination.name,
+                destination.arrivalAlertMethod,
+                isFinalDestination = true,
+                id = destination.id
+            )
+        )
     }
 
     fun savePendingArrival(waypoint: Waypoint): Boolean {
-        return savePendingArrival(waypoint.id, waypoint.name, waypoint.arrivalAlertMethod, false)
+        return enqueuePendingArrival(
+            ArrivalEvent(
+                waypoint.name,
+                waypoint.arrivalAlertMethod,
+                isFinalDestination = false,
+                id = waypoint.id
+            )
+        )
     }
 
-    private fun savePendingArrival(id: Long, name: String, method: ArrivalAlertMethod, isFinal: Boolean): Boolean {
-        if (prefs.contains(KEY_PENDING_NAME)) return false
-        prefs.edit()
-            .putLong(KEY_PENDING_ID, id)
-            .putString(KEY_PENDING_NAME, name)
-            .putString(KEY_PENDING_METHOD, method.name)
-            .putBoolean(KEY_PENDING_IS_FINAL, isFinal)
-            .apply()
-        return true
+    /**
+     * 到着イベントを待機列へ追加する。
+     * 戻り値は、このイベントをすぐ鳴らす必要がある場合だけ true。
+     * すでに同じイベントがある場合や、先行イベントの確認待ちなら false。
+     */
+    private fun enqueuePendingArrival(event: ArrivalEvent): Boolean = synchronized(PENDING_LOCK) {
+        val queue = loadPendingArrivals()
+        if (queue.any { it.id == event.id && it.isFinalDestination == event.isFinalDestination }) {
+            return@synchronized false
+        }
+        val shouldAlertNow = queue.isEmpty()
+        savePendingArrivals(queue + event)
+        shouldAlertNow
     }
 
-    fun getPendingArrival(): ArrivalEvent? {
-        val name = prefs.getString(KEY_PENDING_NAME, null) ?: return null
-        val method = prefs.getString(
+    fun getPendingArrival(): ArrivalEvent? = synchronized(PENDING_LOCK) {
+        loadPendingArrivals().firstOrNull()
+    }
+
+    /** 先頭の到着イベントを確認済みにして、次のイベントを返す。 */
+    fun clearPendingArrival(): ArrivalEvent? = synchronized(PENDING_LOCK) {
+        val remaining = loadPendingArrivals().drop(1)
+        savePendingArrivals(remaining)
+        remaining.firstOrNull()
+    }
+
+    private fun loadPendingArrivals(): List<ArrivalEvent> {
+        val storedQueue = prefs.getString(KEY_PENDING_QUEUE, null)
+        if (storedQueue != null) {
+            return runCatching {
+                val array = JSONArray(storedQueue)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val name = item.optString("name").trim()
+                        if (name.isBlank()) continue
+                        val method = item.optString(
+                            "method",
+                            ArrivalAlertMethod.VIBRATION.name
+                        ).let {
+                            runCatching { ArrivalAlertMethod.valueOf(it) }
+                                .getOrDefault(ArrivalAlertMethod.VIBRATION)
+                        }
+                        add(
+                            ArrivalEvent(
+                                destinationName = name,
+                                alertMethod = method,
+                                isFinalDestination = item.optBoolean("isFinal", true),
+                                id = item.optLong("id", 0L)
+                            )
+                        )
+                    }
+                }
+            }.getOrDefault(emptyList())
+        }
+
+        // 旧版で確認待ちだった1件を、新しい待機列へ引き継ぐ。
+        val legacyName = prefs.getString(KEY_PENDING_NAME, null)?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: return emptyList()
+        val legacyMethod = prefs.getString(
             KEY_PENDING_METHOD,
             ArrivalAlertMethod.VIBRATION.name
         )?.let {
             runCatching { ArrivalAlertMethod.valueOf(it) }
                 .getOrDefault(ArrivalAlertMethod.VIBRATION)
         } ?: ArrivalAlertMethod.VIBRATION
-
-        return ArrivalEvent(name, method, prefs.getBoolean(KEY_PENDING_IS_FINAL, true))
+        return listOf(
+            ArrivalEvent(
+                destinationName = legacyName,
+                alertMethod = legacyMethod,
+                isFinalDestination = prefs.getBoolean(KEY_PENDING_IS_FINAL, true),
+                id = prefs.getLong(KEY_PENDING_ID, 0L)
+            )
+        )
     }
 
-    fun clearPendingArrival() {
+    private fun savePendingArrivals(events: List<ArrivalEvent>) {
+        val array = JSONArray().apply {
+            events.forEach { event ->
+                put(JSONObject().apply {
+                    put("id", event.id)
+                    put("name", event.destinationName)
+                    put("method", event.alertMethod.name)
+                    put("isFinal", event.isFinalDestination)
+                })
+            }
+        }
         prefs.edit()
+            .putString(KEY_PENDING_QUEUE, array.toString())
             .remove(KEY_PENDING_ID)
             .remove(KEY_PENDING_NAME)
             .remove(KEY_PENDING_METHOD)
             .remove(KEY_PENDING_IS_FINAL)
-            .apply()
+            .commit()
     }
 
     companion object {
@@ -224,7 +305,9 @@ class DestinationStore(context: Context) {
         private const val KEY_PENDING_NAME = "pending_arrival_name"
         private const val KEY_PENDING_METHOD = "pending_arrival_method"
         private const val KEY_PENDING_IS_FINAL = "pending_arrival_is_final"
+        private const val KEY_PENDING_QUEUE = "pending_arrival_queue"
         private const val KEY_WAYPOINT_ROUTE_ID = "waypoint_route_id"
         private const val KEY_ANNOUNCED_WAYPOINTS = "announced_waypoints"
+        private val PENDING_LOCK = Any()
     }
 }

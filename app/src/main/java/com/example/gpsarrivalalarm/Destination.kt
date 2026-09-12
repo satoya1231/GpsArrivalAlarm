@@ -7,6 +7,7 @@ enum class ArrivalAlertMethod {
 }
 
 const val NO_DESTINATION_FOLDER = ""
+const val DEFAULT_ARRIVAL_RADIUS_METERS = 1000f
 
 fun ArrivalAlertMethod.label(): String = when (this) {
     ArrivalAlertMethod.NOTIFICATION -> "通知"
@@ -30,12 +31,13 @@ data class Waypoint(
     val name: String,
     val latitude: Double,
     val longitude: Double,
-    val radiusMeters: Float = 500f,
+    val radiusMeters: Float = DEFAULT_ARRIVAL_RADIUS_METERS,
     val arrivalAlertMethod: ArrivalAlertMethod = ArrivalAlertMethod.VIBRATION
 )
 
 data class ArrivalEvent(
     val destinationName: String,
     val alertMethod: ArrivalAlertMethod,
-    val isFinalDestination: Boolean = true
+    val isFinalDestination: Boolean = true,
+    val id: Long = 0L
 )

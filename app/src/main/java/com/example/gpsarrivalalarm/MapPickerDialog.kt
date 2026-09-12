@@ -5,6 +5,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Done
@@ -13,7 +15,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -31,12 +35,14 @@ import org.osmdroid.views.overlay.gestures.RotationGestureOverlay
 fun MapPickerDialog(
     initialLatitude: Double?,
     initialLongitude: Double?,
+    isWaypoint: Boolean = false,
     onDismiss: () -> Unit,
     onSelected: (Double, Double, String?) -> Unit
 ) {
     val context = LocalContext.current
     val azimuth = rememberDeviceAzimuth()
     val placeSearcher = remember { PlaceSearcher(context) }
+    val locationType = if (isWaypoint) "経由駅" else "目的地"
 
     val fallback = GeoPoint(35.681236, 139.767125) // 東京駅付近
     val initial = remember(initialLatitude, initialLongitude) {
@@ -60,7 +66,7 @@ fun MapPickerDialog(
         selectedName = title
         markerRef?.apply {
             position = point
-            this.title = title ?: "目的地"
+            this.title = title ?: locationType
         }
         mapViewRef?.apply {
             invalidate()
@@ -101,7 +107,7 @@ fun MapPickerDialog(
             Box(Modifier.fillMaxSize()) {
                 AndroidView(
                     factory = { ctx ->
-                        createOsmMap(ctx, initial) { point ->
+                        createOsmMap(ctx, initial, locationType) { point ->
                             moveMarker(point, null, animate = false)
                             results = emptyList()
                         }.also { (map, marker) ->
@@ -135,7 +141,7 @@ fun MapPickerDialog(
                                 Icon(Icons.Default.Close, contentDescription = "閉じる")
                             }
                             Column(Modifier.weight(1f)) {
-                                Text("目的地を検索・地図から選択")
+                                Text("${locationType}を検索・地図から選択")
                                 Text(
                                     "OpenStreetMap（APIキー不要）",
                                     style = MaterialTheme.typography.bodySmall
@@ -153,6 +159,21 @@ fun MapPickerDialog(
                                 modifier = Modifier.weight(1f),
                                 label = { Text("住所・駅名・施設名") },
                                 placeholder = { Text("例：名古屋駅 / 東京駅") },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedTextColor = Color.Black,
+                                    unfocusedTextColor = Color.Black,
+                                    cursorColor = Color.Black,
+                                    focusedContainerColor = Color.White,
+                                    unfocusedContainerColor = Color.White,
+                                    focusedLabelColor = Color.Black,
+                                    unfocusedLabelColor = Color.DarkGray,
+                                    focusedPlaceholderColor = Color.DarkGray,
+                                    unfocusedPlaceholderColor = Color.DarkGray,
+                                    focusedBorderColor = Color(0xFF1565C0),
+                                    unfocusedBorderColor = Color.DarkGray
+                                ),
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                keyboardActions = KeyboardActions(onSearch = { runSearch() }),
                                 singleLine = true
                             )
                             Spacer(Modifier.width(6.dp))
@@ -239,7 +260,7 @@ fun MapPickerDialog(
                 ) {
                     Icon(Icons.Default.Done, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("この場所を目的地にする")
+                    Text("この場所を${locationType}にする")
                 }
             }
         }
@@ -249,6 +270,7 @@ fun MapPickerDialog(
 private fun createOsmMap(
     context: Context,
     initial: GeoPoint,
+    markerTitle: String,
     onMapTap: (GeoPoint) -> Unit
 ): Pair<MapView, Marker> {
     // OSM のタイルサーバーは、osmdroid の既定 User-Agent や
@@ -280,7 +302,7 @@ private fun createOsmMap(
     val marker = Marker(map).apply {
         position = initial
         setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-        title = "目的地"
+        title = markerTitle
     }
     map.overlays.add(marker)
 
