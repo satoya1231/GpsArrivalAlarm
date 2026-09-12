@@ -28,7 +28,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,7 +50,6 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import org.osmdroid.views.overlay.gestures.RotationGestureOverlay
-import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -59,9 +57,11 @@ import kotlin.math.roundToInt
 fun ArrivalMapView(
     destination: Destination,
     currentLocation: Location?,
+    followPhoneOrientation: Boolean = true,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val azimuth = rememberDeviceAzimuth()
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
     var destinationMarkerRef by remember { mutableStateOf<Marker?>(null) }
     var currentMarkerRef by remember { mutableStateOf<Marker?>(null) }
@@ -95,6 +95,10 @@ fun ArrivalMapView(
             modifier = Modifier.fillMaxSize(),
             update = { map ->
                 mapViewRef = map
+                // 地図の北向きも端末の向きに合わせ、ヘディングアップ表示にする。
+                if (followPhoneOrientation) {
+                    azimuth?.let { map.setMapOrientation(-it) }
+                }
                 val destinationPoint = GeoPoint(destination.latitude, destination.longitude)
                 destinationMarkerRef?.position = destinationPoint
 
@@ -126,8 +130,10 @@ fun ArrivalMapView(
                             latitude = destination.latitude
                             longitude = destination.longitude
                         }
-                        // 現在地から目的地への方向が画面の真上を向くように初期方位を合わせる。
-                        map.setMapOrientation(-location.bearingTo(destinationLocation))
+                        // 方位センサーがない場合だけ、従来どおり目的地方向を画面上側にする。
+                        if (!followPhoneOrientation || azimuth == null) {
+                            map.setMapOrientation(-location.bearingTo(destinationLocation))
+                        }
                         setInitialZoomToFitMarkers(map, currentPoint, destinationPoint)
                     }
                     map.controller.setCenter(initialCenter)
@@ -215,9 +221,10 @@ fun ArrivalMapView(
             shadowElevation = 4.dp,
             shape = MaterialTheme.shapes.large
         ) {
-            Column(
+            Row(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
                     currentLocation?.let { location ->
@@ -231,18 +238,13 @@ fun ArrivalMapView(
                         )
                         formatMapDistance(distance[0])
                     } ?: "残り距離を取得中…",
+                    modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.primary
                 )
+                MapOrientationIndicator(azimuth = azimuth)
             }
         }
-
-        MapOrientationIndicator(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 96.dp, end = 12.dp),
-            mapView = mapViewRef
-        )
 
         Text(
             text = "© OpenStreetMap contributors",
@@ -492,19 +494,10 @@ private fun formatMapDistance(distanceMeters: Float): String {
 @Composable
 internal fun MapOrientationIndicator(
     modifier: Modifier = Modifier,
-    mapView: MapView?
+    azimuth: Float?
 ) {
-    var mapOrientation by remember(mapView) {
-        mutableStateOf(mapView?.getMapOrientation() ?: 0f)
-    }
-
-    LaunchedEffect(mapView) {
-        val map = mapView ?: return@LaunchedEffect
-        while (true) {
-            mapOrientation = map.getMapOrientation()
-            delay(100L)
-        }
-    }
+    // 端末が東を向くと、北は画面の左側に来るため、針は反時計回りに回す。
+    val northOffset = azimuth?.let { -it } ?: 0f
 
     Surface(
         modifier = modifier,
@@ -517,9 +510,10 @@ internal fun MapOrientationIndicator(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            CompassIcon(mapOrientation)
+            CompassIcon(northOffset)
             Text(
-                "北: ${northOffsetDescription(mapOrientation)}",
+                if (azimuth == null) "方位センサーなし"
+                else "北: ${northOffsetDescription(northOffset)}",
                 style = MaterialTheme.typography.bodySmall
             )
         }
@@ -567,8 +561,8 @@ private fun normalizeDegrees(degrees: Float): Float {
     return ((degrees % 360f) + 360f) % 360f
 }
 
-private fun northOffsetDescription(mapOrientation: Float): String {
-    val normalized = normalizeDegrees(mapOrientation)
+private fun northOffsetDescription(northOffset: Float): String {
+    val normalized = normalizeDegrees(northOffset)
     val signedOffset = if (normalized > 180f) normalized - 360f else normalized
     val degrees = abs(signedOffset).roundToInt()
     return when {

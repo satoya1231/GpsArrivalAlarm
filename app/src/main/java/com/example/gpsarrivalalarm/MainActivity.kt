@@ -132,6 +132,7 @@ class MainActivity : ComponentActivity() {
         var currentLocation by remember { mutableStateOf<Location?>(null) }
         var arrivalEvent by remember { mutableStateOf<ArrivalEvent?>(null) }
         var mapMode by remember { mutableStateOf(activeId != null) }
+        var followPhoneOrientation by remember { mutableStateOf(true) }
         val listState = rememberLazyListState()
         var draggingId by remember { mutableStateOf<Long?>(null) }
         var draggingOffset by remember { mutableFloatStateOf(0f) }
@@ -408,6 +409,23 @@ class MainActivity : ComponentActivity() {
                 TopAppBar(
                     title = { Text(if (mapMode) "地図表示" else "GPS到着アラーム") },
                     actions = {
+                        if (mapMode) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.padding(start = 4.dp)
+                            ) {
+                                Text(
+                                    if (followPhoneOrientation) "スマホ向き" else "手動回転",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                                Switch(
+                                    checked = followPhoneOrientation,
+                                    onCheckedChange = { followPhoneOrientation = it },
+                                    modifier = Modifier.padding(end = 4.dp)
+                                )
+                            }
+                        }
                         if (!mapMode) {
                             Box {
                                 TextButton(onClick = { folderMenuExpanded = true }) {
@@ -484,6 +502,7 @@ class MainActivity : ComponentActivity() {
                 ArrivalMapView(
                     destination = activeDestination,
                     currentLocation = currentLocation,
+                    followPhoneOrientation = followPhoneOrientation,
                     onBack = { mapMode = false },
                     modifier = Modifier.padding(padding)
                 )

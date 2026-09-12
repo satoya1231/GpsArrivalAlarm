@@ -35,6 +35,7 @@ fun MapPickerDialog(
     onSelected: (Double, Double, String?) -> Unit
 ) {
     val context = LocalContext.current
+    val azimuth = rememberDeviceAzimuth()
     val placeSearcher = remember { PlaceSearcher(context) }
 
     val fallback = GeoPoint(35.681236, 139.767125) // 東京駅付近
@@ -112,6 +113,7 @@ fun MapPickerDialog(
                     modifier = Modifier.fillMaxSize(),
                     update = { map ->
                         mapViewRef = map
+                        azimuth?.let { map.setMapOrientation(-it) }
                         markerRef?.position = selected
                         map.invalidate()
                     }
@@ -223,7 +225,7 @@ fun MapPickerDialog(
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
                         .padding(end = 12.dp),
-                    mapView = mapViewRef
+                    azimuth = azimuth
                 )
 
                 Button(
