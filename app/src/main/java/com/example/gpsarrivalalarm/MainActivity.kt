@@ -872,7 +872,7 @@ class MainActivity : ComponentActivity() {
         var showMapPicker by remember { mutableStateOf(false) }
         var waypointMapPickerIndex by remember { mutableStateOf<Int?>(null) }
         var waypoints by remember {
-            mutableStateOf(initial?.waypoints?.map {
+            mutableStateOf<List<WaypointDraft>>(initial?.waypoints?.map {
                 WaypointDraft(
                     it.id, it.name, it.latitude.toString(), it.longitude.toString(),
                     it.radiusMeters.toInt().toString(), it.arrivalAlertMethod
