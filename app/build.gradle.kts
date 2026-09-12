@@ -11,11 +11,11 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.gpsarrivalalarm"
+        applicationId = "com.example.gpsarrivalalarm.waypoints"
         minSdk = 26
         targetSdk = 36
         versionCode = 10
-        versionName = "1.9"
+        versionName = "2.0-waypoints"
     }
 
     buildFeatures {
