@@ -29,11 +29,27 @@ class LocationMonitoringService : Service() {
     private lateinit var locationClient: FusedLocationProviderClient
     private var destination: Destination? = null
     private var arrivalHandled = false
+    private val announcedWaypointIds = mutableSetOf<Long>()
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             val currentDestination = destination ?: return
             val location = result.lastLocation ?: return
+            currentDestination.waypoints.forEach { waypoint ->
+                if (waypoint.id in announcedWaypointIds) return@forEach
+                val waypointDistance = FloatArray(1)
+                Location.distanceBetween(
+                    location.latitude, location.longitude,
+                    waypoint.latitude, waypoint.longitude,
+                    waypointDistance
+                )
+                if (waypointDistance[0] <= waypoint.radiusMeters) {
+                    announcedWaypointIds += waypoint.id
+                    DestinationStore(this@LocationMonitoringService)
+                        .markWaypointAnnounced(currentDestination.id, waypoint.id)
+                    ArrivalAlertCoordinator.announceWaypoint(this@LocationMonitoringService, waypoint)
+                }
+            }
             val distance = FloatArray(1)
             Location.distanceBetween(
                 location.latitude,
@@ -72,6 +88,8 @@ class LocationMonitoringService : Service() {
 
         destination = monitoredDestination
         arrivalHandled = false
+        announcedWaypointIds.clear()
+        announcedWaypointIds += store.getAnnouncedWaypointIds(monitoredDestination.id)
         startForeground(NOTIFICATION_ID, createNotification(monitoredDestination.name))
         requestLocationUpdates()
         return START_STICKY

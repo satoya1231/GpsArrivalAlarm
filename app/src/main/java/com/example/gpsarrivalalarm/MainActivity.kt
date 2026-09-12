@@ -47,6 +47,14 @@ import com.google.android.gms.tasks.CancellationTokenSource
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
+    private data class WaypointDraft(
+        val id: Long,
+        val name: String,
+        val latitude: String,
+        val longitude: String,
+        val radius: String,
+        val alertMethod: ArrivalAlertMethod
+    )
     private lateinit var store: DestinationStore
     private lateinit var geofenceManager: GeofenceManager
     private var arrivalSignal by mutableIntStateOf(0)
@@ -139,7 +147,7 @@ class MainActivity : ComponentActivity() {
 
         fun consumePendingArrival() {
             arrivalEvent = store.getPendingArrival()
-            if (arrivalEvent != null) {
+            if (arrivalEvent?.isFinalDestination == true) {
                 activeId = null
                 mapMode = false
             }
@@ -862,6 +870,15 @@ class MainActivity : ComponentActivity() {
         }
         var locationRequested by remember { mutableStateOf(false) }
         var showMapPicker by remember { mutableStateOf(false) }
+        var waypointMapPickerIndex by remember { mutableStateOf<Int?>(null) }
+        var waypoints by remember {
+            mutableStateOf<List<WaypointDraft>>(initial?.waypoints?.map {
+                WaypointDraft(
+                    it.id, it.name, it.latitude.toString(), it.longitude.toString(),
+                    it.radiusMeters.toInt().toString(), it.arrivalAlertMethod
+                )
+            } ?: emptyList())
+        }
 
         val locationPermissionLauncher = rememberLauncherForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
@@ -943,6 +960,51 @@ class MainActivity : ComponentActivity() {
                             Text(method.label())
                         }
                     }
+                    HorizontalDivider()
+                    Text("途中経由駅（目的地と同じ方法で鳴ります）", fontWeight = FontWeight.Bold)
+                    waypoints.forEachIndexed { index, point ->
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("経由駅 ${index + 1}", modifier = Modifier.weight(1f))
+                                    IconButton(onClick = {
+                                        waypoints = waypoints.filterIndexed { itemIndex, _ -> itemIndex != index }
+                                    }) { Icon(Icons.Default.Delete, "経由駅を削除") }
+                                }
+                                OutlinedTextField(point.name, { value ->
+                                    waypoints = waypoints.toMutableList().also { it[index] = point.copy(name = value) }
+                                }, label = { Text("駅名") }, singleLine = true)
+                                OutlinedTextField(point.latitude, { value ->
+                                    waypoints = waypoints.toMutableList().also { it[index] = point.copy(latitude = value) }
+                                }, label = { Text("緯度") }, singleLine = true)
+                                OutlinedTextField(point.longitude, { value ->
+                                    waypoints = waypoints.toMutableList().also { it[index] = point.copy(longitude = value) }
+                                }, label = { Text("経度") }, singleLine = true)
+                                OutlinedTextField(point.radius, { value ->
+                                    waypoints = waypoints.toMutableList().also { it[index] = point.copy(radius = value.filter(Char::isDigit)) }
+                                }, label = { Text("到着判定距離 (m)") }, singleLine = true)
+                                OutlinedButton(
+                                    onClick = { waypointMapPickerIndex = index },
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Icon(Icons.Default.Map, null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("地図から経由駅を選択")
+                                }
+                            }
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            waypoints = waypoints + WaypointDraft(
+                                System.currentTimeMillis(), "", "", "", "500", alertMethod
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("＋ 経由駅を追加") }
                     OutlinedButton(
                         onClick = { showMapPicker = true },
                         modifier = Modifier
@@ -990,6 +1052,20 @@ class MainActivity : ComponentActivity() {
                         toast("緯度・経度の範囲が正しくありません")
                         return@TextButton
                     }
+                    val savedWaypoints = waypoints.mapNotNull { point ->
+                        val pointLat = point.latitude.toDoubleOrNull()
+                        val pointLon = point.longitude.toDoubleOrNull()
+                        val pointRadius = point.radius.toFloatOrNull()
+                        if (point.name.isBlank() || pointLat == null || pointLon == null || pointRadius == null ||
+                            pointLat !in -90.0..90.0 || pointLon !in -180.0..180.0 || pointRadius < 1f
+                        ) null else Waypoint(
+                            point.id, point.name.trim(), pointLat, pointLon, pointRadius, alertMethod
+                        )
+                    }
+                    if (savedWaypoints.size != waypoints.size) {
+                        toast("経由駅の駅名・位置・到着判定距離を確認してください")
+                        return@TextButton
+                    }
                     onSave(
                         Destination(
                             id = initial?.id ?: System.currentTimeMillis(),
@@ -998,7 +1074,8 @@ class MainActivity : ComponentActivity() {
                             longitude = lon,
                             radiusMeters = rad,
                             folder = folder,
-                            arrivalAlertMethod = alertMethod
+                            arrivalAlertMethod = alertMethod,
+                            waypoints = savedWaypoints
                         )
                     )
                 }) { Text("保存") }
@@ -1023,6 +1100,28 @@ class MainActivity : ComponentActivity() {
                 }
             )
         }
+        waypointMapPickerIndex?.let { index ->
+            val point = waypoints.getOrNull(index)
+            if (point != null) {
+                MapPickerDialog(
+                    initialLatitude = point.latitude.toDoubleOrNull(),
+                    initialLongitude = point.longitude.toDoubleOrNull(),
+                    onDismiss = { waypointMapPickerIndex = null },
+                    onSelected = { lat, lon, placeName ->
+                        waypoints = waypoints.toMutableList().also {
+                            it[index] = point.copy(
+                                name = placeName?.takeIf { value -> value.isNotBlank() }
+                                    ?: point.name.ifBlank { "経由駅" },
+                                latitude = lat.toString(),
+                                longitude = lon.toString(),
+                                alertMethod = alertMethod
+                            )
+                        }
+                        waypointMapPickerIndex = null
+                    }
+                )
+            }
+        }
     }
 
     private fun startMonitoring(destination: Destination, onSuccess: () -> Unit) {
@@ -1030,6 +1129,7 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 result.onSuccess {
                     onSuccess()
+                    store.resetWaypointProgress(destination.id)
                     LocationMonitoringService.start(this, destination)
                     checkImmediateArrival(destination)
                     toast("${destination.name} の到着監視を開始しました")

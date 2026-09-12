@@ -37,7 +37,26 @@ class DestinationStore(context: Context) {
             ).let { method ->
                 runCatching { ArrivalAlertMethod.valueOf(method) }
                     .getOrDefault(ArrivalAlertMethod.VIBRATION)
-            }
+            },
+            waypoints = item.optJSONArray("waypoints")?.let { array ->
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val point = array.optJSONObject(index) ?: continue
+                        runCatching {
+                            Waypoint(
+                                id = point.getLong("id"),
+                                name = point.getString("name"),
+                                latitude = point.getDouble("latitude"),
+                                longitude = point.getDouble("longitude"),
+                                radiusMeters = point.optDouble("radiusMeters", 500.0).toFloat(),
+                                arrivalAlertMethod = point.optString(
+                                    "arrivalAlertMethod", ArrivalAlertMethod.VIBRATION.name
+                                ).let { runCatching { ArrivalAlertMethod.valueOf(it) }.getOrDefault(ArrivalAlertMethod.VIBRATION) }
+                            )
+                        }.getOrNull()?.let(::add)
+                    }
+                }
+            } ?: emptyList()
         )
         require(destination.id > 0L)
         require(destination.name.isNotBlank())
@@ -59,6 +78,18 @@ class DestinationStore(context: Context) {
                     put("longitude", destination.longitude)
                     put("radiusMeters", destination.radiusMeters.toDouble())
                     put("arrivalAlertMethod", destination.arrivalAlertMethod.name)
+                    put("waypoints", JSONArray().apply {
+                        destination.waypoints.forEach { point ->
+                            put(JSONObject().apply {
+                                put("id", point.id)
+                                put("name", point.name)
+                                put("latitude", point.latitude)
+                                put("longitude", point.longitude)
+                                put("radiusMeters", point.radiusMeters.toDouble())
+                                put("arrivalAlertMethod", point.arrivalAlertMethod.name)
+                            })
+                        }
+                    })
                 }
             )
         }
@@ -122,12 +153,42 @@ class DestinationStore(context: Context) {
 
     fun findById(id: Long): Destination? = load().firstOrNull { it.id == id }
 
+    fun getAnnouncedWaypointIds(destinationId: Long): Set<Long> {
+        if (prefs.getLong(KEY_WAYPOINT_ROUTE_ID, -1L) != destinationId) return emptySet()
+        return prefs.getStringSet(KEY_ANNOUNCED_WAYPOINTS, emptySet()).orEmpty()
+            .mapNotNull(String::toLongOrNull).toSet()
+    }
+
+    fun markWaypointAnnounced(destinationId: Long, waypointId: Long) {
+        val updated = getAnnouncedWaypointIds(destinationId) + waypointId
+        prefs.edit()
+            .putLong(KEY_WAYPOINT_ROUTE_ID, destinationId)
+            .putStringSet(KEY_ANNOUNCED_WAYPOINTS, updated.map(Long::toString).toSet())
+            .apply()
+    }
+
+    fun resetWaypointProgress(destinationId: Long) {
+        prefs.edit()
+            .putLong(KEY_WAYPOINT_ROUTE_ID, destinationId)
+            .remove(KEY_ANNOUNCED_WAYPOINTS)
+            .apply()
+    }
+
     fun savePendingArrival(destination: Destination): Boolean {
+        return savePendingArrival(destination.id, destination.name, destination.arrivalAlertMethod, true)
+    }
+
+    fun savePendingArrival(waypoint: Waypoint): Boolean {
+        return savePendingArrival(waypoint.id, waypoint.name, waypoint.arrivalAlertMethod, false)
+    }
+
+    private fun savePendingArrival(id: Long, name: String, method: ArrivalAlertMethod, isFinal: Boolean): Boolean {
         if (prefs.contains(KEY_PENDING_NAME)) return false
         prefs.edit()
-            .putLong(KEY_PENDING_ID, destination.id)
-            .putString(KEY_PENDING_NAME, destination.name)
-            .putString(KEY_PENDING_METHOD, destination.arrivalAlertMethod.name)
+            .putLong(KEY_PENDING_ID, id)
+            .putString(KEY_PENDING_NAME, name)
+            .putString(KEY_PENDING_METHOD, method.name)
+            .putBoolean(KEY_PENDING_IS_FINAL, isFinal)
             .apply()
         return true
     }
@@ -142,7 +203,7 @@ class DestinationStore(context: Context) {
                 .getOrDefault(ArrivalAlertMethod.VIBRATION)
         } ?: ArrivalAlertMethod.VIBRATION
 
-        return ArrivalEvent(name, method)
+        return ArrivalEvent(name, method, prefs.getBoolean(KEY_PENDING_IS_FINAL, true))
     }
 
     fun clearPendingArrival() {
@@ -150,6 +211,7 @@ class DestinationStore(context: Context) {
             .remove(KEY_PENDING_ID)
             .remove(KEY_PENDING_NAME)
             .remove(KEY_PENDING_METHOD)
+            .remove(KEY_PENDING_IS_FINAL)
             .apply()
     }
 
@@ -161,5 +223,8 @@ class DestinationStore(context: Context) {
         private const val KEY_PENDING_ID = "pending_arrival_id"
         private const val KEY_PENDING_NAME = "pending_arrival_name"
         private const val KEY_PENDING_METHOD = "pending_arrival_method"
+        private const val KEY_PENDING_IS_FINAL = "pending_arrival_is_final"
+        private const val KEY_WAYPOINT_ROUTE_ID = "waypoint_route_id"
+        private const val KEY_ANNOUNCED_WAYPOINTS = "announced_waypoints"
     }
 }
