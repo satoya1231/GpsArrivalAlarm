@@ -20,14 +20,28 @@ object ArrivalAlertCoordinator {
         val event = ArrivalEvent(destination.name, destination.arrivalAlertMethod)
         ArrivalAlertService.start(context, event)
         LocationMonitoringService.stop(context)
-        notifyArrival(context, destination.name)
+        notifyArrival(context, destination.name, "目的地に到着しました")
         context.sendBroadcast(
             Intent(GeofenceBroadcastReceiver.ACTION_ARRIVAL)
                 .setPackage(context.packageName)
         )
     }
 
-    private fun notifyArrival(context: Context, destinationName: String) {
+    fun announceWaypoint(context: Context, waypoint: Waypoint) {
+        val store = DestinationStore(context)
+        if (!store.savePendingArrival(waypoint)) return
+
+        ArrivalAlertService.start(
+            context,
+            ArrivalEvent(waypoint.name, waypoint.arrivalAlertMethod, false)
+        )
+        notifyArrival(context, waypoint.name, "経由駅に到着しました")
+        context.sendBroadcast(
+            Intent(GeofenceBroadcastReceiver.ACTION_ARRIVAL).setPackage(context.packageName)
+        )
+    }
+
+    private fun notifyArrival(context: Context, destinationName: String, title: String) {
         val notificationManager = context.getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             notificationManager.createNotificationChannel(
@@ -59,7 +73,7 @@ object ArrivalAlertCoordinator {
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_map)
-            .setContentTitle("目的地に到着しました")
+            .setContentTitle(title)
             .setContentText(destinationName)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
