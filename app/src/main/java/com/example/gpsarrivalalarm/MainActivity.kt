@@ -926,6 +926,14 @@ class MainActivity : ComponentActivity() {
         var locationRequested by remember { mutableStateOf(false) }
         var showMapPicker by remember { mutableStateOf(false) }
         var waypointMapPickerIndex by remember { mutableStateOf<Int?>(null) }
+        val placeSearcher = remember { PlaceSearcher(this@MainActivity) }
+        var showDestinationSearch by remember { mutableStateOf(false) }
+        var destinationSearchQuery by remember { mutableStateOf("") }
+        var destinationSearchResults by remember {
+            mutableStateOf<List<PlaceSearchResult>>(emptyList())
+        }
+        var destinationSearchError by remember { mutableStateOf<String?>(null) }
+        var destinationSearching by remember { mutableStateOf(false) }
         var waypoints by remember {
             mutableStateOf<List<WaypointDraft>>(initial?.waypoints?.map {
                 WaypointDraft(
@@ -940,6 +948,27 @@ class MainActivity : ComponentActivity() {
                 if (alertMethods.size == 1) alertMethods else alertMethods - method
             } else {
                 alertMethods + method
+            }
+        }
+
+        fun searchDestinationName() {
+            val requestedQuery = name.trim()
+            if (requestedQuery.isEmpty() || destinationSearching) return
+            destinationSearchQuery = requestedQuery
+            destinationSearchResults = emptyList()
+            destinationSearchError = null
+            showDestinationSearch = true
+            destinationSearching = true
+            placeSearcher.search(requestedQuery) { result ->
+                destinationSearching = false
+                result.onSuccess { results ->
+                    destinationSearchResults = results
+                    if (results.isEmpty()) {
+                        destinationSearchError = "該当する場所が見つかりませんでした"
+                    }
+                }.onFailure {
+                    destinationSearchError = it.message ?: "検索に失敗しました"
+                }
             }
         }
 
@@ -971,7 +1000,31 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedTextField(name, { name = it }, label = { Text("目的地名") }, singleLine = true)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = name,
+                            onValueChange = { name = it },
+                            label = { Text("目的地名") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        IconButton(
+                            onClick = ::searchDestinationName,
+                            enabled = name.isNotBlank() && !destinationSearching
+                        ) {
+                            if (destinationSearching) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(Icons.Default.Search, contentDescription = "目的地名を検索")
+                            }
+                        }
+                    }
                     OutlinedTextField(latitude, { latitude = it }, label = { Text("緯度") }, singleLine = true)
                     OutlinedTextField(longitude, { longitude = it }, label = { Text("経度") }, singleLine = true)
                     OutlinedTextField(radius, { radius = it.filter(Char::isDigit) }, label = { Text("到着判定距離 (m)") }, singleLine = true)
@@ -1153,6 +1206,63 @@ class MainActivity : ComponentActivity() {
             },
             dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } }
         )
+
+        if (showDestinationSearch) {
+            AlertDialog(
+                onDismissRequest = { showDestinationSearch = false },
+                title = { Text("「$destinationSearchQuery」の検索候補") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        destinationSearchError?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error)
+                        }
+                        if (destinationSearching) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                CircularProgressIndicator()
+                            }
+                        } else if (destinationSearchResults.isNotEmpty()) {
+                            LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
+                                items(destinationSearchResults) { result ->
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                name = result.title
+                                                latitude = result.latitude.toString()
+                                                longitude = result.longitude.toString()
+                                                showDestinationSearch = false
+                                            }
+                                            .padding(vertical = 10.dp)
+                                    ) {
+                                        Text(
+                                            result.title,
+                                            style = MaterialTheme.typography.titleSmall
+                                        )
+                                        if (result.subtitle.isNotBlank() &&
+                                            result.subtitle != result.title
+                                        ) {
+                                            Text(
+                                                result.subtitle,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                    HorizontalDivider()
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showDestinationSearch = false }) {
+                        Text("閉じる")
+                    }
+                }
+            )
+        }
 
         if (showMapPicker) {
             MapPickerDialog(
