@@ -28,17 +28,21 @@ class ArrivalAlertService : Service() {
         }
 
         val destinationName = intent?.getStringExtra(EXTRA_DESTINATION_NAME) ?: return START_NOT_STICKY
-        val alertMethod = intent.getStringExtra(EXTRA_ALERT_METHOD)
-            ?.let { method -> runCatching { ArrivalAlertMethod.valueOf(method) }.getOrNull() }
-            ?: ArrivalAlertMethod.VIBRATION
+        val alertMethods = intent.getStringArrayListExtra(EXTRA_ALERT_METHODS)
+            ?.mapNotNull { method ->
+                runCatching { ArrivalAlertMethod.valueOf(method) }.getOrNull()
+            }
+            ?.toSet()
+            ?.takeIf { it.isNotEmpty() }
+            ?: intent.getStringExtra(EXTRA_ALERT_METHOD)
+                ?.let { method -> runCatching { ArrivalAlertMethod.valueOf(method) }.getOrNull() }
+                ?.let(::setOf)
+            ?: setOf(ArrivalAlertMethod.VIBRATION)
 
         startForeground(NOTIFICATION_ID, createServiceNotification(destinationName))
         stopAlert()
-        when (alertMethod) {
-            ArrivalAlertMethod.SOUND -> startSound()
-            ArrivalAlertMethod.VIBRATION -> startVibration()
-            ArrivalAlertMethod.NOTIFICATION -> Unit
-        }
+        if (ArrivalAlertMethod.SOUND in alertMethods) startSound()
+        if (ArrivalAlertMethod.VIBRATION in alertMethods) startVibration()
         return START_NOT_STICKY
     }
 
@@ -130,6 +134,7 @@ class ArrivalAlertService : Service() {
     companion object {
         private const val ACTION_STOP = "com.example.gpsarrivalalarm.STOP_ARRIVAL_ALERT"
         private const val EXTRA_DESTINATION_NAME = "destination_name"
+        private const val EXTRA_ALERT_METHODS = "alert_methods"
         private const val EXTRA_ALERT_METHOD = "alert_method"
         private const val SERVICE_CHANNEL_ID = "arrival_alert_service"
         private const val NOTIFICATION_ID = 3002
@@ -137,6 +142,10 @@ class ArrivalAlertService : Service() {
         fun start(context: Context, event: ArrivalEvent) {
             val intent = Intent(context, ArrivalAlertService::class.java).apply {
                 putExtra(EXTRA_DESTINATION_NAME, event.destinationName)
+                putStringArrayListExtra(
+                    EXTRA_ALERT_METHODS,
+                    ArrayList(event.alertMethods.map { it.name })
+                )
                 putExtra(EXTRA_ALERT_METHOD, event.alertMethod.name)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

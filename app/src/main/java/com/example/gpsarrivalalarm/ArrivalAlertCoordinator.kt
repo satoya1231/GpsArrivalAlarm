@@ -17,7 +17,7 @@ object ArrivalAlertCoordinator {
         val store = DestinationStore(context)
         val event = ArrivalEvent(
             destination.name,
-            destination.arrivalAlertMethod,
+            destination.alertMethods,
             isFinalDestination = true,
             id = destination.id
         )
@@ -30,7 +30,7 @@ object ArrivalAlertCoordinator {
         val store = DestinationStore(context)
         val event = ArrivalEvent(
             waypoint.name,
-            waypoint.arrivalAlertMethod,
+            waypoint.alertMethods,
             isFinalDestination = false,
             id = waypoint.id
         )

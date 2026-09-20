@@ -15,6 +15,12 @@ fun ArrivalAlertMethod.label(): String = when (this) {
     ArrivalAlertMethod.VIBRATION -> "バイブ"
 }
 
+fun Set<ArrivalAlertMethod>.label(): String =
+    ArrivalAlertMethod.entries
+        .filter { it in this }
+        .joinToString("・") { it.label() }
+        .ifBlank { "なし" }
+
 data class Destination(
     val id: Long,
     val name: String,
@@ -22,9 +28,12 @@ data class Destination(
     val longitude: Double,
     val radiusMeters: Float,
     val folder: String = NO_DESTINATION_FOLDER,
-    val arrivalAlertMethod: ArrivalAlertMethod = ArrivalAlertMethod.VIBRATION,
+    val alertMethods: Set<ArrivalAlertMethod> = setOf(ArrivalAlertMethod.VIBRATION),
     val waypoints: List<Waypoint> = emptyList()
-)
+) {
+    val arrivalAlertMethod: ArrivalAlertMethod
+        get() = alertMethods.firstOrNull() ?: ArrivalAlertMethod.VIBRATION
+}
 
 data class Waypoint(
     val id: Long,
@@ -32,12 +41,18 @@ data class Waypoint(
     val latitude: Double,
     val longitude: Double,
     val radiusMeters: Float = DEFAULT_ARRIVAL_RADIUS_METERS,
-    val arrivalAlertMethod: ArrivalAlertMethod = ArrivalAlertMethod.VIBRATION
-)
+    val alertMethods: Set<ArrivalAlertMethod> = setOf(ArrivalAlertMethod.VIBRATION)
+) {
+    val arrivalAlertMethod: ArrivalAlertMethod
+        get() = alertMethods.firstOrNull() ?: ArrivalAlertMethod.VIBRATION
+}
 
 data class ArrivalEvent(
     val destinationName: String,
-    val alertMethod: ArrivalAlertMethod,
+    val alertMethods: Set<ArrivalAlertMethod>,
     val isFinalDestination: Boolean = true,
     val id: Long = 0L
-)
+) {
+    val alertMethod: ArrivalAlertMethod
+        get() = alertMethods.firstOrNull() ?: ArrivalAlertMethod.VIBRATION
+}

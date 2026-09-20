@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
         val latitude: String,
         val longitude: String,
         val radius: String,
-        val alertMethod: ArrivalAlertMethod
+        val alertMethods: Set<ArrivalAlertMethod>
     )
     private lateinit var store: DestinationStore
     private lateinit var geofenceManager: GeofenceManager
@@ -562,7 +562,7 @@ class MainActivity : ComponentActivity() {
                             DestinationCard(
                                 destination = destination,
                                 active = activeId == destination.id,
-                                alertMethod = destination.arrivalAlertMethod,
+                                alertMethods = destination.alertMethods,
                                 dragEnabled = true,
                                 dragging = draggingId == destination.id,
                                 dragOffset = if (draggingId == destination.id) draggingOffset else 0f,
@@ -715,7 +715,7 @@ class MainActivity : ComponentActivity() {
     private fun DestinationCard(
         destination: Destination,
         active: Boolean,
-        alertMethod: ArrivalAlertMethod,
+        alertMethods: Set<ArrivalAlertMethod>,
         dragEnabled: Boolean,
         dragging: Boolean,
         dragOffset: Float,
@@ -770,7 +770,7 @@ class MainActivity : ComponentActivity() {
                             style = MaterialTheme.typography.bodySmall
                         )
                         Text("到着範囲 ${destination.radiusMeters.toInt()} m")
-                        Text("到着時：${alertMethod.label()}", style = MaterialTheme.typography.bodySmall)
+                        Text("到着時：${alertMethods.label()}", style = MaterialTheme.typography.bodySmall)
                         Text(
                             "緯度 %.6f / 経度 %.6f".format(destination.latitude, destination.longitude),
                             style = MaterialTheme.typography.bodySmall
@@ -917,8 +917,11 @@ class MainActivity : ComponentActivity() {
             mutableStateOf(initial?.folder ?: initialFolder ?: NO_DESTINATION_FOLDER)
         }
         var folderMenuExpanded by remember { mutableStateOf(false) }
-        var alertMethod by remember {
-            mutableStateOf(initial?.arrivalAlertMethod ?: ArrivalAlertMethod.VIBRATION)
+        var alertMethods by remember {
+            mutableStateOf(
+                initial?.alertMethods?.ifEmpty { setOf(ArrivalAlertMethod.VIBRATION) }
+                    ?: setOf(ArrivalAlertMethod.VIBRATION)
+            )
         }
         var locationRequested by remember { mutableStateOf(false) }
         var showMapPicker by remember { mutableStateOf(false) }
@@ -927,9 +930,17 @@ class MainActivity : ComponentActivity() {
             mutableStateOf<List<WaypointDraft>>(initial?.waypoints?.map {
                 WaypointDraft(
                     it.id, it.name, it.latitude.toString(), it.longitude.toString(),
-                    it.radiusMeters.toInt().toString(), it.arrivalAlertMethod
+                    it.radiusMeters.toInt().toString(), it.alertMethods
                 )
             } ?: emptyList())
+        }
+
+        fun toggleAlertMethod(method: ArrivalAlertMethod) {
+            alertMethods = if (method in alertMethods) {
+                if (alertMethods.size == 1) alertMethods else alertMethods - method
+            } else {
+                alertMethods + method
+            }
         }
 
         val locationPermissionLauncher = rememberLauncherForActivityResult(
@@ -1000,20 +1011,27 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     Text("目的地到着時の連絡方法")
-                    ArrivalAlertMethod.entries.forEach { method ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = alertMethod == method,
-                                onClick = { alertMethod = method }
-                            )
-                            Text(method.label())
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ArrivalAlertMethod.entries.forEach { method ->
+                            Row(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { toggleAlertMethod(method) },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = method in alertMethods,
+                                    onCheckedChange = { toggleAlertMethod(method) }
+                                )
+                                Text(method.label(), style = MaterialTheme.typography.bodySmall)
+                            }
                         }
                     }
                     HorizontalDivider()
-                    Text("途中経由駅（目的地と同じ方法で鳴ります）", fontWeight = FontWeight.Bold)
+                    Text("途中経由駅", fontWeight = FontWeight.Bold)
                     waypoints.forEachIndexed { index, point ->
                         Card(modifier = Modifier.fillMaxWidth()) {
                             Column(
@@ -1053,7 +1071,7 @@ class MainActivity : ComponentActivity() {
                         onClick = {
                             waypoints = waypoints + WaypointDraft(
                                 System.currentTimeMillis(), "", "", "",
-                                DEFAULT_ARRIVAL_RADIUS_METERS.toInt().toString(), alertMethod
+                                DEFAULT_ARRIVAL_RADIUS_METERS.toInt().toString(), alertMethods
                             )
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -1112,7 +1130,7 @@ class MainActivity : ComponentActivity() {
                         if (point.name.isBlank() || pointLat == null || pointLon == null || pointRadius == null ||
                             pointLat !in -90.0..90.0 || pointLon !in -180.0..180.0 || pointRadius < 1f
                         ) null else Waypoint(
-                            point.id, point.name.trim(), pointLat, pointLon, pointRadius, alertMethod
+                            point.id, point.name.trim(), pointLat, pointLon, pointRadius, alertMethods
                         )
                     }
                     if (savedWaypoints.size != waypoints.size) {
@@ -1127,7 +1145,7 @@ class MainActivity : ComponentActivity() {
                             longitude = lon,
                             radiusMeters = rad,
                             folder = folder,
-                            arrivalAlertMethod = alertMethod,
+                            alertMethods = alertMethods,
                             waypoints = savedWaypoints
                         )
                     )
@@ -1168,7 +1186,7 @@ class MainActivity : ComponentActivity() {
                                     ?: point.name.ifBlank { "経由駅" },
                                 latitude = lat.toString(),
                                 longitude = lon.toString(),
-                                alertMethod = alertMethod
+                                alertMethods = alertMethods
                             )
                         }
                         waypointMapPickerIndex = null

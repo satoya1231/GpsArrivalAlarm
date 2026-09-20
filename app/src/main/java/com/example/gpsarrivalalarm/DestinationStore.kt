@@ -4,6 +4,21 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 
+private fun JSONArray.toArrivalAlertMethods(): Set<ArrivalAlertMethod> =
+    buildSet {
+        for (index in 0 until length()) {
+            optString(index).takeIf { it.isNotBlank() }?.let { value ->
+                runCatching { ArrivalAlertMethod.valueOf(value) }
+                    .getOrNull()
+                    ?.let(::add)
+            }
+        }
+    }.ifEmpty { setOf(ArrivalAlertMethod.VIBRATION) }
+
+private fun String.toArrivalAlertMethods(): Set<ArrivalAlertMethod> =
+    runCatching { setOf(ArrivalAlertMethod.valueOf(this)) }
+        .getOrDefault(setOf(ArrivalAlertMethod.VIBRATION))
+
 class DestinationStore(context: Context) {
     private val prefs = context.getSharedPreferences("destinations", Context.MODE_PRIVATE)
 
@@ -31,13 +46,11 @@ class DestinationStore(context: Context) {
             latitude = item.getDouble("latitude"),
             longitude = item.getDouble("longitude"),
             radiusMeters = item.getDouble("radiusMeters").toFloat(),
-            arrivalAlertMethod = item.optString(
+            alertMethods = item.optJSONArray("alertMethods")?.toArrivalAlertMethods()
+                ?: item.optString(
                 "arrivalAlertMethod",
                 ArrivalAlertMethod.VIBRATION.name
-            ).let { method ->
-                runCatching { ArrivalAlertMethod.valueOf(method) }
-                    .getOrDefault(ArrivalAlertMethod.VIBRATION)
-            },
+            ).toArrivalAlertMethods(),
             waypoints = item.optJSONArray("waypoints")?.let { array ->
                 buildList {
                     for (index in 0 until array.length()) {
@@ -52,9 +65,10 @@ class DestinationStore(context: Context) {
                                     "radiusMeters",
                                     DEFAULT_ARRIVAL_RADIUS_METERS.toDouble()
                                 ).toFloat(),
-                                arrivalAlertMethod = point.optString(
+                                alertMethods = point.optJSONArray("alertMethods")?.toArrivalAlertMethods()
+                                    ?: point.optString(
                                     "arrivalAlertMethod", ArrivalAlertMethod.VIBRATION.name
-                                ).let { runCatching { ArrivalAlertMethod.valueOf(it) }.getOrDefault(ArrivalAlertMethod.VIBRATION) }
+                                ).toArrivalAlertMethods()
                             )
                         }.getOrNull()?.let(::add)
                     }
@@ -80,6 +94,7 @@ class DestinationStore(context: Context) {
                     put("latitude", destination.latitude)
                     put("longitude", destination.longitude)
                     put("radiusMeters", destination.radiusMeters.toDouble())
+                    put("alertMethods", JSONArray(destination.alertMethods.map { it.name }))
                     put("arrivalAlertMethod", destination.arrivalAlertMethod.name)
                     put("waypoints", JSONArray().apply {
                         destination.waypoints.forEach { point ->
@@ -89,7 +104,8 @@ class DestinationStore(context: Context) {
                                 put("latitude", point.latitude)
                                 put("longitude", point.longitude)
                                 put("radiusMeters", point.radiusMeters.toDouble())
-                                put("arrivalAlertMethod", point.arrivalAlertMethod.name)
+                            put("alertMethods", JSONArray(point.alertMethods.map { it.name }))
+                            put("arrivalAlertMethod", point.arrivalAlertMethod.name)
                             })
                         }
                     })
@@ -181,7 +197,7 @@ class DestinationStore(context: Context) {
         return enqueuePendingArrival(
             ArrivalEvent(
                 destination.name,
-                destination.arrivalAlertMethod,
+                destination.alertMethods,
                 isFinalDestination = true,
                 id = destination.id
             )
@@ -192,7 +208,7 @@ class DestinationStore(context: Context) {
         return enqueuePendingArrival(
             ArrivalEvent(
                 waypoint.name,
-                waypoint.arrivalAlertMethod,
+                waypoint.alertMethods,
                 isFinalDestination = false,
                 id = waypoint.id
             )
@@ -235,17 +251,15 @@ class DestinationStore(context: Context) {
                         val item = array.optJSONObject(index) ?: continue
                         val name = item.optString("name").trim()
                         if (name.isBlank()) continue
-                        val method = item.optString(
+                        val methods = item.optJSONArray("methods")?.toArrivalAlertMethods()
+                            ?: item.optString(
                             "method",
                             ArrivalAlertMethod.VIBRATION.name
-                        ).let {
-                            runCatching { ArrivalAlertMethod.valueOf(it) }
-                                .getOrDefault(ArrivalAlertMethod.VIBRATION)
-                        }
+                        ).toArrivalAlertMethods()
                         add(
                             ArrivalEvent(
                                 destinationName = name,
-                                alertMethod = method,
+                                alertMethods = methods,
                                 isFinalDestination = item.optBoolean("isFinal", true),
                                 id = item.optLong("id", 0L)
                             )
@@ -259,17 +273,14 @@ class DestinationStore(context: Context) {
         val legacyName = prefs.getString(KEY_PENDING_NAME, null)?.trim()
             ?.takeIf { it.isNotBlank() }
             ?: return emptyList()
-        val legacyMethod = prefs.getString(
+        val legacyMethods = prefs.getString(
             KEY_PENDING_METHOD,
             ArrivalAlertMethod.VIBRATION.name
-        )?.let {
-            runCatching { ArrivalAlertMethod.valueOf(it) }
-                .getOrDefault(ArrivalAlertMethod.VIBRATION)
-        } ?: ArrivalAlertMethod.VIBRATION
+        )?.toArrivalAlertMethods() ?: setOf(ArrivalAlertMethod.VIBRATION)
         return listOf(
             ArrivalEvent(
                 destinationName = legacyName,
-                alertMethod = legacyMethod,
+                alertMethods = legacyMethods,
                 isFinalDestination = prefs.getBoolean(KEY_PENDING_IS_FINAL, true),
                 id = prefs.getLong(KEY_PENDING_ID, 0L)
             )
@@ -282,6 +293,7 @@ class DestinationStore(context: Context) {
                 put(JSONObject().apply {
                     put("id", event.id)
                     put("name", event.destinationName)
+                    put("methods", JSONArray(event.alertMethods.map { it.name }))
                     put("method", event.alertMethod.name)
                     put("isFinal", event.isFinalDestination)
                 })
