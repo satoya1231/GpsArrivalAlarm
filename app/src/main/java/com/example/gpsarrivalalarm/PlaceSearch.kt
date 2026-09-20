@@ -3,17 +3,20 @@ package com.example.gpsarrivalalarm
 import android.content.Context
 import android.location.Address
 import android.location.Geocoder
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 import java.util.Locale
+import org.json.JSONArray
 
 /**
- * Android 標準 Geocoder を使った住所・駅名・施設名検索。
+ * ユーザー操作による住所・駅名・施設名検索。
  *
- * 以前の版は公開 Nominatim サーバーへ直接 HTTP 通信していたため、
- * サーバー側の利用制限によって HTTP 403 になる場合がありました。
- * この版では検索時に Nominatim へ直接アクセスしないため、403 を回避します。
+ * 端末依存の Geocoder は候補を1件しか返さないことがあるため、
+ * 検索ボタン押下時は Nominatim から複数候補を取得し、失敗時だけ Geocoder に戻す。
  */
 data class PlaceSearchResult(
     val title: String,
@@ -25,6 +28,8 @@ data class PlaceSearchResult(
 class PlaceSearcher(context: Context) {
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val cache = mutableMapOf<String, List<PlaceSearchResult>>()
+    private var lastRemoteSearchAt = 0L
 
     fun search(
         query: String,
@@ -36,61 +41,63 @@ class PlaceSearcher(context: Context) {
             return
         }
 
-        if (!Geocoder.isPresent()) {
-            deliver {
-                onResult(
-                    Result.failure(
-                        IllegalStateException(
-                            "この端末では住所検索サービスを利用できません。地図をタップして目的地を選択してください。"
-                        )
-                    )
-                )
+        synchronized(cache) {
+            cache[normalized]?.let { cached ->
+                deliver { onResult(Result.success(cached)) }
+                return
             }
-            return
         }
 
-        val geocoder = Geocoder(appContext, Locale.JAPAN)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Thread {
             try {
-                geocoder.getFromLocationName(
-                    normalized,
-                    MAX_RESULTS,
-                    object : Geocoder.GeocodeListener {
-                        override fun onGeocode(addresses: MutableList<Address>) {
-                            deliver {
-                                onResult(Result.success(addresses.toSearchResults()))
-                            }
-                        }
-
-                        override fun onError(errorMessage: String?) {
-                            deliver {
-                                onResult(
-                                    Result.failure(
-                                        IllegalStateException(
-                                            errorMessage?.takeIf { it.isNotBlank() }
-                                                ?: "場所を検索できませんでした。地図をタップして選択することもできます。"
-                                        )
-                                    )
-                                )
-                            }
-                        }
-                    }
-                )
+                val results = runCatching { searchWithNominatim(normalized) }
+                    .getOrNull()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?: searchWithGeocoder(normalized)
+                synchronized(cache) { cache[normalized] = results }
+                deliver { onResult(Result.success(results)) }
             } catch (t: Throwable) {
                 deliver { onResult(Result.failure(searchFailure(t))) }
             }
-        } else {
-            Thread {
-                try {
-                    @Suppress("DEPRECATION")
-                    val addresses = geocoder.getFromLocationName(normalized, MAX_RESULTS).orEmpty()
-                    deliver { onResult(Result.success(addresses.toSearchResults())) }
-                } catch (t: Throwable) {
-                    deliver { onResult(Result.failure(searchFailure(t))) }
-                }
-            }.start()
+        }.start()
+    }
+
+    private fun searchWithNominatim(query: String): List<PlaceSearchResult> {
+        waitForRemoteSearchSlot()
+        val encodedQuery = URLEncoder.encode(query, Charsets.UTF_8.name())
+        val url = URL(
+            "$NOMINATIM_URL?format=jsonv2&addressdetails=1" +
+                "&limit=$MAX_RESULTS&accept-language=ja&countrycodes=jp&q=$encodedQuery"
+        )
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = REMOTE_TIMEOUT_MILLIS
+            readTimeout = REMOTE_TIMEOUT_MILLIS
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("User-Agent", USER_AGENT)
         }
+
+        return try {
+            if (connection.responseCode !in 200..299) {
+                throw IOException("検索サービスの応答エラー: ${connection.responseCode}")
+            }
+            val body = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            JSONArray(body).toSearchResults()
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun searchWithGeocoder(query: String): List<PlaceSearchResult> {
+        if (!Geocoder.isPresent()) {
+            throw IllegalStateException(
+                "この端末では住所検索サービスを利用できません。地図をタップして目的地を選択してください。"
+            )
+        }
+        val geocoder = Geocoder(appContext, Locale.JAPAN)
+        @Suppress("DEPRECATION")
+        val addresses = geocoder.getFromLocationName(query, MAX_RESULTS).orEmpty()
+        return addresses.toSearchResults()
     }
 
     private fun List<Address>.toSearchResults(): List<PlaceSearchResult> =
@@ -130,6 +137,44 @@ class PlaceSearcher(context: Context) {
             "%.6f,%.6f".format(Locale.US, it.latitude, it.longitude)
         }
 
+    private fun JSONArray.toSearchResults(): List<PlaceSearchResult> =
+        (0 until length()).mapNotNull { index ->
+            val item = optJSONObject(index) ?: return@mapNotNull null
+            val latitude = item.optString("lat").toDoubleOrNull() ?: return@mapNotNull null
+            val longitude = item.optString("lon").toDoubleOrNull() ?: return@mapNotNull null
+            val displayName = item.optString("display_name").trim()
+            val baseTitle = item.optString("name").trim()
+                .ifBlank { displayName.substringBefore(',').trim() }
+                .ifBlank { "検索結果" }
+            val placeType = item.optString("type").lowercase(Locale.ROOT)
+            val placeClass = item.optString("class").lowercase(Locale.ROOT)
+            val isStation = placeType in STATION_TYPES ||
+                (placeClass == "public_transport" && placeType in PUBLIC_TRANSPORT_TYPES)
+            val title = if (isStation && !baseTitle.contains("駅")) {
+                "${baseTitle}駅"
+            } else {
+                baseTitle
+            }
+
+            PlaceSearchResult(
+                title = title,
+                subtitle = displayName,
+                latitude = latitude,
+                longitude = longitude
+            )
+        }.distinctBy {
+            "%.6f,%.6f".format(Locale.US, it.latitude, it.longitude)
+        }
+
+    private fun waitForRemoteSearchSlot() {
+        synchronized(this) {
+            val waitMillis = MIN_REMOTE_INTERVAL_MILLIS -
+                (System.currentTimeMillis() - lastRemoteSearchAt)
+            if (waitMillis > 0) Thread.sleep(waitMillis)
+            lastRemoteSearchAt = System.currentTimeMillis()
+        }
+    }
+
     private fun searchFailure(t: Throwable): IllegalStateException {
         val message = t.message.orEmpty()
         return IllegalStateException(
@@ -148,6 +193,18 @@ class PlaceSearcher(context: Context) {
     }
 
     companion object {
-        private const val MAX_RESULTS = 5
+        private const val NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+        private const val USER_AGENT = "GpsArrivalAlarm/2.1 (Android map search)"
+        private const val MAX_RESULTS = 10
+        private const val REMOTE_TIMEOUT_MILLIS = 10_000
+        private const val MIN_REMOTE_INTERVAL_MILLIS = 1_000L
+        private val STATION_TYPES = setOf(
+            "station",
+            "train_station",
+            "halt",
+            "subway_entrance",
+            "tram_stop"
+        )
+        private val PUBLIC_TRANSPORT_TYPES = setOf("platform", "stop", "station")
     }
 }

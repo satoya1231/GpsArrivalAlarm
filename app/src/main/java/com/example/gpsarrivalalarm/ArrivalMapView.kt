@@ -48,9 +48,11 @@ import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
-import org.osmdroid.views.overlay.Polyline
+import org.osmdroid.views.overlay.Overlay
 import org.osmdroid.views.overlay.gestures.RotationGestureOverlay
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 @Composable
@@ -65,7 +67,7 @@ fun ArrivalMapView(
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
     var destinationMarkerRef by remember { mutableStateOf<Marker?>(null) }
     var currentMarkerRef by remember { mutableStateOf<Marker?>(null) }
-    var routeLineRef by remember { mutableStateOf<Polyline?>(null) }
+    var destinationArrowRef by remember { mutableStateOf<DestinationArrowOverlay?>(null) }
     var lastCenteredLocation by remember { mutableStateOf<Location?>(null) }
     var hasInitialLocationFrame by remember { mutableStateOf(false) }
     var hasInitialDestinationPosition by remember { mutableStateOf(false) }
@@ -77,7 +79,7 @@ fun ArrivalMapView(
             mapViewRef = null
             destinationMarkerRef = null
             currentMarkerRef = null
-            routeLineRef = null
+            destinationArrowRef = null
         }
     }
 
@@ -88,7 +90,7 @@ fun ArrivalMapView(
                     mapViewRef = mapObjects.map
                     destinationMarkerRef = mapObjects.destinationMarker
                     currentMarkerRef = mapObjects.currentMarker
-                    routeLineRef = mapObjects.routeLine
+                    destinationArrowRef = mapObjects.destinationArrow
                     mapObjects.map.onResume()
                 }.map
             },
@@ -108,10 +110,7 @@ fun ArrivalMapView(
                     position = currentPoint ?: position
                     isEnabled = currentPoint != null
                 }
-                routeLineRef?.setPoints(
-                    if (currentPoint == null) emptyList()
-                    else listOf(currentPoint, destinationPoint)
-                )
+                destinationArrowRef?.setPoints(currentPoint, destinationPoint)
 
                 // 初回だけ、目的地が画面上側に来るように地図を配置する。
                 // 現在地の取得が遅れた場合は、取得できた時点で現在地も含めて初期配置する。
@@ -260,7 +259,7 @@ private data class ArrivalMapObjects(
     val map: MapView,
     val destinationMarker: Marker,
     val currentMarker: Marker,
-    val routeLine: Polyline
+    val destinationArrow: DestinationArrowOverlay
 )
 
 private fun createArrivalMap(context: android.content.Context, destination: Destination): ArrivalMapObjects {
@@ -301,21 +300,18 @@ private fun createArrivalMap(context: android.content.Context, destination: Dest
         title = "現在地"
         isEnabled = false
     }
-    val routeLine = Polyline(map).apply {
-        outlinePaint.color = 0xff1565c0.toInt()
-        outlinePaint.strokeWidth = 6f
-    }
-    map.overlays.add(routeLine)
+    val destinationArrow = DestinationArrowOverlay(map.resources.displayMetrics.density)
+    map.overlays.add(destinationArrow)
     map.overlays.add(destinationMarker)
     map.overlays.add(currentMarker)
-    return ArrivalMapObjects(map, destinationMarker, currentMarker, routeLine)
+    return ArrivalMapObjects(map, destinationMarker, currentMarker, destinationArrow)
 }
 
 private fun createCurrentLocationIcon(context: Context): Drawable {
-    return GoogleCurrentLocationDrawable(context.resources.displayMetrics.density)
+    return CurrentLocationCircleDrawable(context.resources.displayMetrics.density)
 }
 
-private class GoogleCurrentLocationDrawable(
+private class CurrentLocationCircleDrawable(
     private val density: Float
 ) : Drawable() {
     private val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -329,27 +325,10 @@ private class GoogleCurrentLocationDrawable(
 
     override fun draw(canvas: AndroidCanvas) {
         val centerX = bounds.exactCenterX()
-        val top = bounds.top.toFloat() + 3f * density
-        val bottom = bounds.bottom.toFloat() - 3f * density
-        val halfWidth = bounds.width() * 0.34f
-
-        val outline = AndroidPath().apply {
-            moveTo(centerX, top)
-            lineTo(centerX + halfWidth, bottom)
-            lineTo(centerX, bottom - halfWidth * 0.38f)
-            lineTo(centerX - halfWidth, bottom)
-            close()
-        }
-        val inset = 2f * density
-        val inner = AndroidPath().apply {
-            moveTo(centerX, top + inset)
-            lineTo(centerX + halfWidth - inset, bottom - inset)
-            lineTo(centerX, bottom - halfWidth * 0.38f - inset)
-            lineTo(centerX - halfWidth + inset, bottom - inset)
-            close()
-        }
-        canvas.drawPath(outline, outlinePaint)
-        canvas.drawPath(inner, dotPaint)
+        val centerY = bounds.exactCenterY()
+        val radius = min(bounds.width(), bounds.height()) * 0.31f
+        canvas.drawCircle(centerX, centerY, radius + 2f * density, outlinePaint)
+        canvas.drawCircle(centerX, centerY, radius, dotPaint)
     }
 
     override fun getIntrinsicWidth(): Int = (32f * density).toInt()
@@ -367,6 +346,96 @@ private class GoogleCurrentLocationDrawable(
     }
 
     override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+}
+
+/** 現在地から目的地の座標まで伸び、先端が目的地に一致する矢印。 */
+private class DestinationArrowOverlay(
+    private val density: Float
+) : Overlay() {
+    private var start: GeoPoint? = null
+    private var end: GeoPoint? = null
+
+    private val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.STROKE
+        strokeWidth = 11f * density
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val shaftPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xff1565c0.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = 6f * density
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val arrowOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+    }
+    private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xff1565c0.toInt()
+        style = Paint.Style.FILL
+    }
+
+    fun setPoints(start: GeoPoint?, end: GeoPoint?) {
+        this.start = start
+        this.end = end
+    }
+
+    override fun draw(canvas: AndroidCanvas, mapView: MapView, shadow: Boolean) {
+        if (shadow) return
+        val startPoint = start ?: return
+        val endPoint = end ?: return
+        val startPixel = mapView.projection.toPixels(startPoint, null)
+        val endPixel = mapView.projection.toPixels(endPoint, null)
+        val startX = startPixel.x.toFloat()
+        val startY = startPixel.y.toFloat()
+        val endX = endPixel.x.toFloat()
+        val endY = endPixel.y.toFloat()
+        val deltaX = endX - startX
+        val deltaY = endY - startY
+        val length = hypot(deltaX.toDouble(), deltaY.toDouble()).toFloat()
+        if (length < 2f * density) return
+
+        val unitX = deltaX / length
+        val unitY = deltaY / length
+        val headLength = min(42f * density, length * 0.42f)
+        val shaftEndX = endX - unitX * headLength * 0.48f
+        val shaftEndY = endY - unitY * headLength * 0.48f
+
+        // 白い縁取りを先に描いて、地図上でも矢印を見やすくする。
+        canvas.drawLine(startX, startY, shaftEndX, shaftEndY, outlinePaint)
+        canvas.drawLine(startX, startY, shaftEndX, shaftEndY, shaftPaint)
+
+        val normalX = -unitY
+        val normalY = unitX
+        val halfHeadWidth = headLength * 0.52f
+        val baseX = endX - unitX * headLength
+        val baseY = endY - unitY * headLength
+
+        val outlineHead = AndroidPath().apply {
+            moveTo(endX, endY)
+            lineTo(
+                baseX + normalX * (halfHeadWidth + 2f * density),
+                baseY + normalY * (halfHeadWidth + 2f * density)
+            )
+            lineTo(
+                baseX - normalX * (halfHeadWidth + 2f * density),
+                baseY - normalY * (halfHeadWidth + 2f * density)
+            )
+            close()
+        }
+        canvas.drawPath(outlineHead, arrowOutlinePaint)
+
+        val head = AndroidPath().apply {
+            moveTo(endX, endY)
+            lineTo(baseX + normalX * halfHeadWidth, baseY + normalY * halfHeadWidth)
+            lineTo(baseX - normalX * halfHeadWidth, baseY - normalY * halfHeadWidth)
+            close()
+        }
+        canvas.drawPath(head, arrowPaint)
+    }
 }
 
 private fun createDestinationIcon(context: Context): Drawable {

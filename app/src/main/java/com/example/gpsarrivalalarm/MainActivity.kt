@@ -137,6 +137,7 @@ class MainActivity : ComponentActivity() {
         var deleting by remember { mutableStateOf<Destination?>(null) }
         var showEditor by remember { mutableStateOf(false) }
         var pendingStart by remember { mutableStateOf<Destination?>(null) }
+        var pendingStop by remember { mutableStateOf<Destination?>(null) }
         var currentLocation by remember { mutableStateOf<Location?>(null) }
         var arrivalEvent by remember { mutableStateOf<ArrivalEvent?>(null) }
         var mapMode by remember { mutableStateOf(activeId != null) }
@@ -299,6 +300,17 @@ class MainActivity : ComponentActivity() {
                     activeId = destination.id
                     mapMode = true
                 }
+            }
+        }
+
+        fun stopMonitoring(destination: Destination) {
+            geofenceManager.stop {
+                LocationMonitoringService.stop(this@MainActivity)
+                if (activeId == destination.id) {
+                    activeId = null
+                    mapMode = false
+                }
+                toast("監視を停止しました")
             }
         }
 
@@ -586,14 +598,7 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onDelete = { deleting = destination },
                                 onStart = { requestStart(destination) },
-                                onStop = {
-                                    geofenceManager.stop {
-                                        LocationMonitoringService.stop(this@MainActivity)
-                                        activeId = null
-                                        mapMode = false
-                                        toast("監視を停止しました")
-                                    }
-                                }
+                                onStop = { pendingStop = destination }
                             )
                         }
                     }
@@ -681,6 +686,29 @@ class MainActivity : ComponentActivity() {
                 }
             )
         }
+
+        pendingStop?.let { destination ->
+            AlertDialog(
+                onDismissRequest = { pendingStop = null },
+                title = { Text("監視を停止") },
+                text = { Text("「${destination.name}」の監視を停止しますか？") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            pendingStop = null
+                            stopMonitoring(destination)
+                        }
+                    ) {
+                        Text("停止")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingStop = null }) {
+                        Text("キャンセル")
+                    }
+                }
+            )
+        }
     }
 
     @Composable
@@ -730,7 +758,12 @@ class MainActivity : ComponentActivity() {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(destination.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = if (active) "${destination.name}（開始中）" else destination.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.clickable(enabled = active, onClick = onStop)
+                        )
                         Text(
                             if (destination.folder.isBlank()) "フォルダなし"
                             else "フォルダ: ${destination.folder}",

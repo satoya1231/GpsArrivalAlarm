@@ -55,7 +55,9 @@ fun MapPickerDialog(
     var selected by remember(initialLatitude, initialLongitude) { mutableStateOf(initial) }
     var selectedName by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
+    var lastSearchedQuery by remember { mutableStateOf("") }
     var results by remember { mutableStateOf<List<PlaceSearchResult>>(emptyList()) }
+    var selectedResult by remember { mutableStateOf<PlaceSearchResult?>(null) }
     var searching by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
@@ -81,10 +83,13 @@ fun MapPickerDialog(
         placeSearcher.search(query) { result ->
             searching = false
             result.onSuccess {
+                lastSearchedQuery = query.trim()
                 results = it
+                selectedResult = null
                 if (it.isEmpty()) searchError = "該当する場所が見つかりませんでした"
             }.onFailure {
                 results = emptyList()
+                selectedResult = null
                 searchError = it.message ?: "検索に失敗しました"
             }
         }
@@ -110,6 +115,7 @@ fun MapPickerDialog(
                         createOsmMap(ctx, initial, locationType) { point ->
                             moveMarker(point, null, animate = false)
                             results = emptyList()
+                            selectedResult = null
                         }.also { (map, marker) ->
                             map.onResume()
                             mapViewRef = map
@@ -202,32 +208,84 @@ fun MapPickerDialog(
                         }
 
                         if (results.isNotEmpty()) {
+                            Text(
+                                text = if (results.size > 1) {
+                                    "「$lastSearchedQuery」の候補（${results.size}件）"
+                                } else {
+                                    "検索候補（1件）"
+                                },
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.padding(top = 8.dp, start = 4.dp)
+                            )
+                            Text(
+                                text = "候補をタップして地図上の位置を確認し、選択してください。",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(start = 4.dp, bottom = 2.dp)
+                            )
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(max = 220.dp)
+                                    .heightIn(max = 250.dp)
                                     .padding(top = 6.dp)
                             ) {
                                 LazyColumn {
                                     items(results) { result ->
+                                        val isSelected = selectedResult == result
                                         Column(
                                             modifier = Modifier
                                                 .fillMaxWidth()
                                                 .clickable {
                                                     val point = GeoPoint(result.latitude, result.longitude)
+                                                    selectedResult = result
                                                     moveMarker(point, result.title)
                                                     mapViewRef?.controller?.setZoom(16.0)
-                                                    results = emptyList()
                                                 }
+                                                .then(
+                                                    if (isSelected) {
+                                                        Modifier.padding(2.dp)
+                                                    } else {
+                                                        Modifier
+                                                    }
+                                                )
                                                 .padding(horizontal = 12.dp, vertical = 10.dp)
                                         ) {
-                                            Text(result.title, style = MaterialTheme.typography.titleSmall)
-                                            if (result.subtitle.isNotBlank() && result.subtitle != result.title) {
-                                                Text(result.subtitle, style = MaterialTheme.typography.bodySmall)
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                RadioButton(
+                                                    selected = isSelected,
+                                                    onClick = null
+                                                )
+                                                Spacer(Modifier.width(4.dp))
+                                                Column(Modifier.weight(1f)) {
+                                                    Text(result.title, style = MaterialTheme.typography.titleSmall)
+                                                    if (result.subtitle.isNotBlank() && result.subtitle != result.title) {
+                                                        Text(result.subtitle, style = MaterialTheme.typography.bodySmall)
+                                                    }
+                                                }
+                                            }
+                                            if (isSelected) {
+                                                Text(
+                                                    "選択中：下のボタンでこの場所を確定できます",
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    modifier = Modifier.padding(start = 52.dp, top = 2.dp)
+                                                )
                                             }
                                         }
                                         HorizontalDivider()
                                     }
+                                }
+                            }
+                            selectedResult?.let {
+                                OutlinedButton(
+                                    onClick = {
+                                        results = emptyList()
+                                        selectedResult = null
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 6.dp)
+                                ) {
+                                    Text("候補の選択を確定")
                                 }
                             }
                         }
