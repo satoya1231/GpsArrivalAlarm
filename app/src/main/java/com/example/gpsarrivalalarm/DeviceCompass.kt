@@ -1,10 +1,12 @@
 package com.example.gpsarrivalalarm
 
 import android.content.Context
+import android.hardware.GeomagneticField
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
 import android.view.Surface
 import android.view.WindowManager
 import androidx.compose.runtime.Composable
@@ -16,11 +18,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 
 /**
- * Returns the phone's magnetic heading in degrees (0° = north, clockwise).
+ * Returns the phone's heading in degrees (0° = north, clockwise).
+ * When a location is available, magnetic heading is corrected to true north.
  * The value is null while the device has no usable orientation sensor.
  */
 @Composable
-internal fun rememberDeviceAzimuth(): Float? {
+internal fun rememberDeviceAzimuth(location: Location? = null): Float? {
     val context = LocalContext.current
     var azimuth by remember { mutableFloatStateOf(Float.NaN) }
 
@@ -35,7 +38,23 @@ internal fun rememberDeviceAzimuth(): Float? {
         }
     }
 
-    return azimuth.takeUnless { it.isNaN() }
+    val declination = remember(
+        location?.latitude,
+        location?.longitude,
+        location?.altitude
+    ) {
+        location?.let {
+            GeomagneticField(
+                it.latitude.toFloat(),
+                it.longitude.toFloat(),
+                it.altitude.toFloat(),
+                System.currentTimeMillis()
+            ).declination
+        } ?: 0f
+    }
+
+    // SensorManager reports magnetic north; map bearings use true north.
+    return azimuth.takeUnless { it.isNaN() }?.let { normalizeDegrees(it + declination) }
 }
 
 private class DeviceCompassListener(
@@ -44,13 +63,15 @@ private class DeviceCompassListener(
 ) : SensorEventListener {
     private val sensorManager =
         context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+    private val windowManager =
+        context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val rotationVectorSensor =
         sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
     private val accelerometerSensor =
         sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
     private val magneticFieldSensor =
         sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
-    private val displayRotation = getDisplayRotation(context)
+    private var displayRotation = getDisplayRotation()
 
     private val rotationMatrix = FloatArray(9)
     private val remappedRotationMatrix = FloatArray(9)
@@ -114,6 +135,12 @@ private class DeviceCompassListener(
 
         if (!matrixReady) return
 
+        val currentDisplayRotation = getDisplayRotation()
+        if (currentDisplayRotation != displayRotation) {
+            displayRotation = currentDisplayRotation
+            smoothedAzimuth = Float.NaN
+        }
+
         val matrix = if (displayRotation == Surface.ROTATION_0) {
             rotationMatrix
         } else {
@@ -146,11 +173,9 @@ private class DeviceCompassListener(
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
-    private fun getDisplayRotation(context: Context): Int {
+    private fun getDisplayRotation(): Int {
         @Suppress("DEPRECATION")
-        return (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
-            .defaultDisplay
-            .rotation
+        return windowManager.defaultDisplay.rotation
     }
 }
 

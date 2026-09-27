@@ -36,13 +36,18 @@ fun MapPickerDialog(
     initialLatitude: Double?,
     initialLongitude: Double?,
     isWaypoint: Boolean = false,
+    isDeparture: Boolean = false,
     onDismiss: () -> Unit,
     onSelected: (Double, Double, String?) -> Unit
 ) {
     val context = LocalContext.current
     val azimuth = rememberDeviceAzimuth()
     val placeSearcher = remember { PlaceSearcher(context) }
-    val locationType = if (isWaypoint) "経由駅" else "目的地"
+    val locationType = when {
+        isWaypoint -> "経由駅"
+        isDeparture -> "出発地"
+        else -> "目的地"
+    }
 
     val fallback = GeoPoint(35.681236, 139.767125) // 東京駅付近
     val initial = remember(initialLatitude, initialLongitude) {

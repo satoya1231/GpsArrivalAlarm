@@ -29,10 +29,33 @@ data class Destination(
     val radiusMeters: Float,
     val folder: String = NO_DESTINATION_FOLDER,
     val alertMethods: Set<ArrivalAlertMethod> = setOf(ArrivalAlertMethod.VIBRATION),
-    val waypoints: List<Waypoint> = emptyList()
+    val waypoints: List<Waypoint> = emptyList(),
+    val departureName: String = "",
+    val departureLatitude: Double? = null,
+    val departureLongitude: Double? = null
 ) {
     val arrivalAlertMethod: ArrivalAlertMethod
         get() = alertMethods.firstOrNull() ?: ArrivalAlertMethod.VIBRATION
+
+    val hasDeparture: Boolean
+        get() = departureLatitude?.isFinite() == true && departureLongitude?.isFinite() == true
+}
+
+/** 行き先と出発地を入れ替え、経由駅も帰り道の順番に並べ替える。 */
+fun Destination.reversedRoute(): Destination? {
+    val returnLatitude = departureLatitude ?: return null
+    val returnLongitude = departureLongitude ?: return null
+    if (!returnLatitude.isFinite() || !returnLongitude.isFinite()) return null
+
+    return copy(
+        name = departureName.trim().ifBlank { "出発地" },
+        latitude = returnLatitude,
+        longitude = returnLongitude,
+        departureName = name,
+        departureLatitude = latitude,
+        departureLongitude = longitude,
+        waypoints = waypoints.asReversed()
+    )
 }
 
 data class Waypoint(

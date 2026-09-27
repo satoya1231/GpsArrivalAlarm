@@ -19,6 +19,17 @@ private fun String.toArrivalAlertMethods(): Set<ArrivalAlertMethod> =
     runCatching { setOf(ArrivalAlertMethod.valueOf(this)) }
         .getOrDefault(setOf(ArrivalAlertMethod.VIBRATION))
 
+private fun JSONObject.optTrimmedString(vararg keys: String): String =
+    keys.asSequence()
+        .map { optString(it, "").trim() }
+        .firstOrNull { it.isNotBlank() }
+        .orEmpty()
+
+private fun JSONObject.optFiniteDouble(vararg keys: String): Double? =
+    keys.asSequence()
+        .map { optDouble(it, Double.NaN) }
+        .firstOrNull { it.isFinite() }
+
 class DestinationStore(context: Context) {
     private val prefs = context.getSharedPreferences("destinations", Context.MODE_PRIVATE)
 
@@ -37,6 +48,57 @@ class DestinationStore(context: Context) {
     }
 
     private fun parseDestination(item: JSONObject): Destination {
+        // 出発地対応前の試作版で使われていたキー名や、入れ子形式も読み込む。
+        // 読み込んだデータは次回保存時に現在の departure* 形式へ正規化される。
+        val legacyDeparture = item.optJSONObject("departure")
+            ?: item.optJSONObject("origin")
+            ?: item.optJSONObject("start")
+        val departureName = item.optTrimmedString(
+            "departureName",
+            "departure_name",
+            "startName",
+            "start_name",
+            "originName",
+            "origin_name",
+            "fromName",
+            "from_name"
+        ).ifBlank { legacyDeparture?.optTrimmedString("name", "label").orEmpty() }
+        val departureLatitude = item.optFiniteDouble(
+            "departureLatitude",
+            "departure_latitude",
+            "departureLat",
+            "departure_lat",
+            "startLatitude",
+            "start_latitude",
+            "startLat",
+            "start_lat",
+            "originLatitude",
+            "origin_latitude",
+            "originLat",
+            "origin_lat",
+            "fromLatitude",
+            "from_latitude",
+            "fromLat",
+            "from_lat"
+        ) ?: legacyDeparture?.optFiniteDouble("latitude", "lat")
+        val departureLongitude = item.optFiniteDouble(
+            "departureLongitude",
+            "departure_longitude",
+            "departureLon",
+            "departure_lon",
+            "startLongitude",
+            "start_longitude",
+            "startLon",
+            "start_lon",
+            "originLongitude",
+            "origin_longitude",
+            "originLon",
+            "origin_lon",
+            "fromLongitude",
+            "from_longitude",
+            "fromLon",
+            "from_lon"
+        ) ?: legacyDeparture?.optFiniteDouble("longitude", "lon")
         val destination = Destination(
             id = item.getLong("id"),
             name = item.getString("name"),
@@ -73,7 +135,10 @@ class DestinationStore(context: Context) {
                         }.getOrNull()?.let(::add)
                     }
                 }
-            } ?: emptyList()
+            } ?: emptyList(),
+            departureName = departureName,
+            departureLatitude = departureLatitude,
+            departureLongitude = departureLongitude
         )
         require(destination.id > 0L)
         require(destination.name.isNotBlank())
@@ -96,6 +161,9 @@ class DestinationStore(context: Context) {
                     put("radiusMeters", destination.radiusMeters.toDouble())
                     put("alertMethods", JSONArray(destination.alertMethods.map { it.name }))
                     put("arrivalAlertMethod", destination.arrivalAlertMethod.name)
+                    put("departureName", destination.departureName)
+                    destination.departureLatitude?.let { put("departureLatitude", it) }
+                    destination.departureLongitude?.let { put("departureLongitude", it) }
                     put("waypoints", JSONArray().apply {
                         destination.waypoints.forEach { point ->
                             put(JSONObject().apply {

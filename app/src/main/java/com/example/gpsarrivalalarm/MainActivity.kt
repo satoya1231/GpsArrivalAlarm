@@ -1,6 +1,8 @@
 package com.example.gpsarrivalalarm
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
@@ -12,6 +14,8 @@ import android.provider.Settings
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.os.SystemClock
+import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -46,7 +50,63 @@ import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import kotlin.math.roundToInt
 
+private class ArrivalMapLocationFilter {
+    private var lastAcceptedLocation: Location? = null
+
+    fun accept(candidate: Location): Location? {
+        val nowNanos = SystemClock.elapsedRealtimeNanos()
+        val ageNanos = nowNanos - candidate.elapsedRealtimeNanos
+        if (candidate.elapsedRealtimeNanos <= 0L || ageNanos !in 0L..MAX_LOCATION_AGE_NANOS) {
+            return null
+        }
+        if (candidate.hasAccuracy() && candidate.accuracy > MAX_LOCATION_ACCURACY_METERS) {
+            return null
+        }
+
+        val previous = lastAcceptedLocation
+        if (previous != null) {
+            val elapsedNanos = candidate.elapsedRealtimeNanos - previous.elapsedRealtimeNanos
+            if (elapsedNanos <= 0L) return null
+            if (elapsedNanos <= MAX_OUTLIER_GAP_NANOS) {
+                val elapsedSeconds = elapsedNanos.toDouble() / NANOS_PER_SECOND
+                val accuracyAllowance = previous.accuracyAllowance() + candidate.accuracyAllowance()
+                val maxDistanceMeters = (
+                    MAX_LOCATION_SPEED_METERS_PER_SECOND * elapsedSeconds +
+                        accuracyAllowance + LOCATION_JUMP_BUFFER_METERS
+                    ).toFloat()
+                if (previous.distanceTo(candidate) > maxDistanceMeters) return null
+            }
+        }
+
+        lastAcceptedLocation = Location(candidate)
+        return candidate
+    }
+
+    private fun Location.accuracyAllowance(): Float =
+        if (hasAccuracy()) accuracy.coerceAtMost(MAX_LOCATION_ACCURACY_METERS) else 0f
+
+    private companion object {
+        const val NANOS_PER_SECOND = 1_000_000_000.0
+        const val MAX_LOCATION_AGE_NANOS = 30_000_000_000L
+        const val MAX_OUTLIER_GAP_NANOS = 60_000_000_000L
+        const val MAX_LOCATION_ACCURACY_METERS = 100f
+        const val MAX_LOCATION_SPEED_METERS_PER_SECOND = 120f
+        const val LOCATION_JUMP_BUFFER_METERS = 50f
+    }
+}
+
 class MainActivity : ComponentActivity() {
+    private enum class LocationInputTarget {
+        DESTINATION,
+        DEPARTURE
+    }
+
+    private enum class NameSearchTarget {
+        DESTINATION,
+        DEPARTURE,
+        WAYPOINT
+    }
+
     private data class WaypointDraft(
         val id: Long,
         val name: String,
@@ -173,10 +233,17 @@ class MainActivity : ComponentActivity() {
 
         DisposableEffect(activeId) {
             currentLocation = null
+            val locationFilter = ArrivalMapLocationFilter()
+            var isEffectActive = true
+            fun publishMapLocation(location: Location?) {
+                if (!isEffectActive || location == null) return
+                locationFilter.accept(location)?.let { currentLocation = it }
+            }
+
             val locationClient = LocationServices.getFusedLocationProviderClient(this@MainActivity)
             val locationCallback = object : LocationCallback() {
                 override fun onLocationResult(result: LocationResult) {
-                    currentLocation = result.lastLocation
+                    publishMapLocation(result.lastLocation)
                 }
             }
             val hasLocationPermission = ContextCompat.checkSelfPermission(
@@ -186,7 +253,7 @@ class MainActivity : ComponentActivity() {
 
             if (activeId != null && hasLocationPermission) {
                 locationClient.lastLocation.addOnSuccessListener { location ->
-                    if (location != null) currentLocation = location
+                    publishMapLocation(location)
                 }
                 val request = LocationRequest.Builder(
                     Priority.PRIORITY_HIGH_ACCURACY,
@@ -202,6 +269,7 @@ class MainActivity : ComponentActivity() {
             }
 
             onDispose {
+                isEffectActive = false
                 locationClient.removeLocationUpdates(locationCallback)
             }
         }
@@ -301,6 +369,44 @@ class MainActivity : ComponentActivity() {
                     mapMode = true
                 }
             }
+        }
+
+        fun reverseAndSave(destination: Destination): Destination? {
+            val reversed = destination.reversedRoute()
+            if (reversed == null) {
+                toast("出発地を設定してから往復を開始してください")
+                return null
+            }
+            val updated = destinations.map { item ->
+                if (item.id == destination.id) reversed else item
+            }
+            destinations = updated
+            store.save(updated)
+            return reversed
+        }
+
+        fun swapSavedRoute(destination: Destination) {
+            if (activeId == destination.id) {
+                toast("監視中は行先と出発を入れ替えられません")
+                return
+            }
+            if (!destination.hasDeparture) {
+                editing = destination
+                showEditor = true
+                toast("出発地を設定して保存すると、行先と出発を入れ替えられます")
+                return
+            }
+            reverseAndSave(destination)?.let {
+                toast("行先と出発を入れ替えました")
+            }
+        }
+
+        fun startRoundTrip(destination: Destination) {
+            val reversed = reverseAndSave(destination) ?: return
+            ArrivalAlertService.stop(this@MainActivity)
+            store.clearPendingArrival()
+            arrivalEvent = null
+            requestStart(reversed)
         }
 
         fun stopMonitoring(destination: Destination) {
@@ -427,6 +533,8 @@ class MainActivity : ComponentActivity() {
             deleting = null
         }
 
+        val activeDestination = destinations.firstOrNull { it.id == activeId }
+
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -520,7 +628,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         ) { padding ->
-            val activeDestination = destinations.firstOrNull { it.id == activeId }
             if (mapMode && activeDestination != null) {
                 ArrivalMapView(
                     destination = activeDestination,
@@ -598,7 +705,8 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onDelete = { deleting = destination },
                                 onStart = { requestStart(destination) },
-                                onStop = { pendingStop = destination }
+                                onStop = { pendingStop = destination },
+                                onSwapRoute = { swapSavedRoute(destination) }
                             )
                         }
                     }
@@ -641,6 +749,9 @@ class MainActivity : ComponentActivity() {
         }
 
         arrivalEvent?.let { event ->
+            val roundTripDestination = destinations
+                .firstOrNull { it.id == event.id }
+                ?.takeIf { event.isFinalDestination && it.hasDeparture }
             AlertDialog(
                 onDismissRequest = ::dismissArrival,
                 title = {
@@ -664,6 +775,15 @@ class MainActivity : ComponentActivity() {
                 confirmButton = {
                     TextButton(onClick = ::dismissArrival) {
                         Text("確認")
+                    }
+                },
+                dismissButton = {
+                    if (roundTripDestination != null) {
+                        TextButton(onClick = {
+                            startRoundTrip(roundTripDestination)
+                        }) {
+                            Text("往復開始")
+                        }
                     }
                 }
             )
@@ -731,7 +851,8 @@ class MainActivity : ComponentActivity() {
         onEdit: () -> Unit,
         onDelete: () -> Unit,
         onStart: () -> Unit,
-        onStop: () -> Unit
+        onStop: () -> Unit,
+        onSwapRoute: () -> Unit
     ) {
         val dragModifier = if (dragEnabled) {
             Modifier.pointerInput(destination.id) {
@@ -756,7 +877,10 @@ class MainActivity : ComponentActivity() {
                 .then(dragModifier)
         ) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top
+                ) {
                     Column(Modifier.weight(1f)) {
                         Text(
                             text = if (active) "${destination.name}（開始中）" else destination.name,
@@ -775,6 +899,33 @@ class MainActivity : ComponentActivity() {
                             "緯度 %.6f / 経度 %.6f".format(destination.latitude, destination.longitude),
                             style = MaterialTheme.typography.bodySmall
                         )
+                        if (destination.hasDeparture) {
+                            Text(
+                                "出発地: ${destination.departureName.ifBlank { "登録地点" }}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text("往復設定あり", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    if (!active) {
+                        OutlinedButton(
+                            onClick = onSwapRoute,
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .widthIn(max = 132.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Default.SwapVert, contentDescription = null)
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                if (destination.hasDeparture) {
+                                    "行先と出発を入れ替える"
+                                } else {
+                                    "出発地を設定"
+                                },
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                     }
                 }
 
@@ -907,6 +1058,13 @@ class MainActivity : ComponentActivity() {
         var name by remember { mutableStateOf(initial?.name ?: "") }
         var latitude by remember { mutableStateOf(initial?.latitude?.toString() ?: "") }
         var longitude by remember { mutableStateOf(initial?.longitude?.toString() ?: "") }
+        var departureName by remember { mutableStateOf(initial?.departureName ?: "") }
+        var departureLatitude by remember {
+            mutableStateOf(initial?.departureLatitude?.toString() ?: "")
+        }
+        var departureLongitude by remember {
+            mutableStateOf(initial?.departureLongitude?.toString() ?: "")
+        }
         var radius by remember {
             mutableStateOf(
                 initial?.radiusMeters?.toInt()?.toString()
@@ -924,16 +1082,23 @@ class MainActivity : ComponentActivity() {
             )
         }
         var locationRequested by remember { mutableStateOf(false) }
+        var locationInputTarget by remember {
+            mutableStateOf(LocationInputTarget.DESTINATION)
+        }
         var showMapPicker by remember { mutableStateOf(false) }
+        var showDepartureMapPicker by remember { mutableStateOf(false) }
         var waypointMapPickerIndex by remember { mutableStateOf<Int?>(null) }
         val placeSearcher = remember { PlaceSearcher(this@MainActivity) }
-        var showDestinationSearch by remember { mutableStateOf(false) }
-        var destinationSearchQuery by remember { mutableStateOf("") }
-        var destinationSearchResults by remember {
+        var nameSearchTarget by remember { mutableStateOf<NameSearchTarget?>(null) }
+        var nameSearchWaypointIndex by remember { mutableStateOf<Int?>(null) }
+        var nameSearchQuery by remember { mutableStateOf("") }
+        var nameSearchResults by remember {
             mutableStateOf<List<PlaceSearchResult>>(emptyList())
         }
-        var destinationSearchError by remember { mutableStateOf<String?>(null) }
-        var destinationSearching by remember { mutableStateOf(false) }
+        var nameSearchError by remember { mutableStateOf<String?>(null) }
+        var nameSearching by remember { mutableStateOf(false) }
+        var voiceInputTarget by remember { mutableStateOf<NameSearchTarget?>(null) }
+        var voiceInputWaypointIndex by remember { mutableStateOf<Int?>(null) }
         var waypoints by remember {
             mutableStateOf<List<WaypointDraft>>(initial?.waypoints?.map {
                 WaypointDraft(
@@ -951,24 +1116,170 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        fun searchDestinationName() {
-            val requestedQuery = name.trim()
-            if (requestedQuery.isEmpty() || destinationSearching) return
-            destinationSearchQuery = requestedQuery
-            destinationSearchResults = emptyList()
-            destinationSearchError = null
-            showDestinationSearch = true
-            destinationSearching = true
+        fun swapEndpoints() {
+            val returnLatitude = departureLatitude.toDoubleOrNull()
+            val returnLongitude = departureLongitude.toDoubleOrNull()
+            if (returnLatitude == null || returnLongitude == null) {
+                toast("先に出発地の緯度・経度を入力してください")
+                return
+            }
+            if (returnLatitude !in -90.0..90.0 || returnLongitude !in -180.0..180.0) {
+                toast("出発地の緯度・経度の範囲が正しくありません")
+                return
+            }
+
+            val oldName = name
+            val oldLatitude = latitude
+            val oldLongitude = longitude
+            name = departureName.trim().ifBlank { "出発地" }
+            latitude = departureLatitude
+            longitude = departureLongitude
+            departureName = oldName
+            departureLatitude = oldLatitude
+            departureLongitude = oldLongitude
+            waypoints = waypoints.asReversed()
+        }
+
+        fun searchPlaceName(target: NameSearchTarget, query: String, waypointIndex: Int? = null) {
+            val requestedQuery = query.trim()
+            if (requestedQuery.isEmpty() || nameSearching) return
+            nameSearchTarget = target
+            nameSearchWaypointIndex = waypointIndex
+            nameSearchQuery = requestedQuery
+            nameSearchResults = emptyList()
+            nameSearchError = null
+            nameSearching = true
             placeSearcher.search(requestedQuery) { result ->
-                destinationSearching = false
+                nameSearching = false
                 result.onSuccess { results ->
-                    destinationSearchResults = results
+                    nameSearchResults = results
                     if (results.isEmpty()) {
-                        destinationSearchError = "該当する場所が見つかりませんでした"
+                        nameSearchError = "該当する場所が見つかりませんでした"
                     }
                 }.onFailure {
-                    destinationSearchError = it.message ?: "検索に失敗しました"
+                    nameSearchError = it.message ?: "検索に失敗しました"
                 }
+            }
+        }
+
+        fun closeNameSearch() {
+            nameSearchTarget = null
+            nameSearchWaypointIndex = null
+        }
+
+        fun applyNameSearchResult(result: PlaceSearchResult) {
+            when (nameSearchTarget) {
+                NameSearchTarget.DESTINATION -> {
+                    name = result.title
+                    latitude = result.latitude.toString()
+                    longitude = result.longitude.toString()
+                }
+                NameSearchTarget.DEPARTURE -> {
+                    departureName = result.title
+                    departureLatitude = result.latitude.toString()
+                    departureLongitude = result.longitude.toString()
+                }
+                NameSearchTarget.WAYPOINT -> {
+                    val index = nameSearchWaypointIndex
+                    val point = index?.let(waypoints::getOrNull)
+                    if (index != null && point != null) {
+                        waypoints = waypoints.toMutableList().also {
+                            it[index] = point.copy(
+                                name = result.title,
+                                latitude = result.latitude.toString(),
+                                longitude = result.longitude.toString()
+                            )
+                        }
+                    }
+                }
+                null -> Unit
+            }
+            closeNameSearch()
+        }
+
+        fun applyVoiceInput(target: NameSearchTarget?, waypointIndex: Int?, text: String) {
+            when (target) {
+                NameSearchTarget.DESTINATION -> name = text
+                NameSearchTarget.DEPARTURE -> departureName = text
+                NameSearchTarget.WAYPOINT -> {
+                    val point = waypointIndex?.let(waypoints::getOrNull)
+                    if (waypointIndex != null && point != null) {
+                        waypoints = waypoints.toMutableList().also {
+                            it[waypointIndex] = point.copy(name = text)
+                        }
+                    }
+                }
+                null -> Unit
+            }
+        }
+
+        val speechRecognizerLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            val recognizedText = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.trim()
+                .orEmpty()
+            val target = voiceInputTarget
+            val waypointIndex = voiceInputWaypointIndex
+            if (result.resultCode == Activity.RESULT_OK && recognizedText.isNotBlank()) {
+                applyVoiceInput(target, waypointIndex, recognizedText)
+            } else if (result.resultCode == Activity.RESULT_OK) {
+                toast("音声を認識できませんでした")
+            }
+            voiceInputTarget = null
+            voiceInputWaypointIndex = null
+        }
+
+        fun launchSpeechRecognizer(target: NameSearchTarget) {
+            val targetLabel = when (target) {
+                NameSearchTarget.DESTINATION -> "目的地"
+                NameSearchTarget.DEPARTURE -> "出発地"
+                NameSearchTarget.WAYPOINT -> "経由駅"
+            }
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                )
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ja-JP")
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "${targetLabel}の名前を話してください")
+            }
+            try {
+                speechRecognizerLauncher.launch(intent)
+            } catch (_: ActivityNotFoundException) {
+                voiceInputTarget = null
+                voiceInputWaypointIndex = null
+                toast("音声入力を利用できるアプリがありません")
+            }
+        }
+
+        val speechPermissionLauncher = rememberLauncherForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            val target = voiceInputTarget
+            if (granted && target != null) {
+                launchSpeechRecognizer(target)
+            } else if (!granted) {
+                voiceInputTarget = null
+                voiceInputWaypointIndex = null
+                toast("音声入力にはマイクの許可が必要です")
+            }
+        }
+
+        fun startVoiceInput(target: NameSearchTarget, waypointIndex: Int? = null) {
+            if (voiceInputTarget != null || nameSearching) return
+            voiceInputTarget = target
+            voiceInputWaypointIndex = waypointIndex
+            if (ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                launchSpeechRecognizer(target)
+            } else {
+                speechPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
         }
 
@@ -983,12 +1294,34 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(locationRequested) {
             if (!locationRequested) return@LaunchedEffect
             locationRequested = false
+            val target = locationInputTarget
             fillCurrentLocation(
                 onSuccess = { lat, lon ->
-                    latitude = lat.toString()
-                    longitude = lon.toString()
-                    if (name.isBlank()) name = "現在地"
+                    if (target == LocationInputTarget.DEPARTURE) {
+                        departureLatitude = lat.toString()
+                        departureLongitude = lon.toString()
+                        if (departureName.isBlank()) departureName = "現在地"
+                    } else {
+                        latitude = lat.toString()
+                        longitude = lon.toString()
+                        if (name.isBlank()) name = "現在地"
+                    }
                 }
+            )
+        }
+
+        fun requestCurrentLocation(target: LocationInputTarget) {
+            locationInputTarget = target
+            val granted = ContextCompat.checkSelfPermission(
+                this@MainActivity,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+            if (granted) locationRequested = true
+            else locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
             )
         }
 
@@ -1012,10 +1345,12 @@ class MainActivity : ComponentActivity() {
                             singleLine = true
                         )
                         IconButton(
-                            onClick = ::searchDestinationName,
-                            enabled = name.isNotBlank() && !destinationSearching
+                            onClick = {
+                                searchPlaceName(NameSearchTarget.DESTINATION, name)
+                            },
+                            enabled = name.isNotBlank() && !nameSearching
                         ) {
-                            if (destinationSearching) {
+                            if (nameSearching && nameSearchTarget == NameSearchTarget.DESTINATION) {
                                 CircularProgressIndicator(
                                     modifier = Modifier.size(20.dp),
                                     strokeWidth = 2.dp
@@ -1024,44 +1359,78 @@ class MainActivity : ComponentActivity() {
                                 Icon(Icons.Default.Search, contentDescription = "目的地名を検索")
                             }
                         }
-                    }
-                    OutlinedTextField(latitude, { latitude = it }, label = { Text("緯度") }, singleLine = true)
-                    OutlinedTextField(longitude, { longitude = it }, label = { Text("経度") }, singleLine = true)
-                    OutlinedTextField(radius, { radius = it.filter(Char::isDigit) }, label = { Text("到着判定距離 (m)") }, singleLine = true)
-                    Box {
-                        OutlinedTextField(
-                            value = folder.ifBlank { "フォルダなし" },
-                            onValueChange = {},
-                            readOnly = true,
-                            label = { Text("フォルダ") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        DropdownMenu(
-                            expanded = folderMenuExpanded,
-                            onDismissRequest = { folderMenuExpanded = false }
+                        IconButton(
+                            onClick = { startVoiceInput(NameSearchTarget.DESTINATION) },
+                            enabled = !nameSearching && voiceInputTarget == null
                         ) {
-                            DropdownMenuItem(
-                                text = { Text("フォルダなし（すべてのフォルダに表示）") },
-                                onClick = {
-                                    folder = NO_DESTINATION_FOLDER
-                                    folderMenuExpanded = false
-                                }
+                            Icon(Icons.Default.Mic, contentDescription = "目的地名を音声入力")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            latitude,
+                            { latitude = it },
+                            label = { Text("緯度") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            longitude,
+                            { longitude = it },
+                            label = { Text("経度") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            radius,
+                            { radius = it.filter(Char::isDigit) },
+                            label = { Text("到着判定距離 (m)") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        Box(modifier = Modifier.weight(1f)) {
+                            OutlinedTextField(
+                                value = folder.ifBlank { "フォルダなし" },
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("フォルダ") },
+                                modifier = Modifier.fillMaxWidth()
                             )
-                            folders.forEach { availableFolder ->
+                            DropdownMenu(
+                                expanded = folderMenuExpanded,
+                                onDismissRequest = { folderMenuExpanded = false }
+                            ) {
                                 DropdownMenuItem(
-                                    text = { Text(availableFolder) },
+                                    text = { Text("フォルダなし（すべてのフォルダに表示）") },
                                     onClick = {
-                                        folder = availableFolder
+                                        folder = NO_DESTINATION_FOLDER
                                         folderMenuExpanded = false
                                     }
                                 )
+                                folders.forEach { availableFolder ->
+                                    DropdownMenuItem(
+                                        text = { Text(availableFolder) },
+                                        onClick = {
+                                            folder = availableFolder
+                                            folderMenuExpanded = false
+                                        }
+                                    )
+                                }
                             }
+                            Spacer(
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .clickable { folderMenuExpanded = true }
+                            )
                         }
-                        Spacer(
-                            modifier = Modifier
-                                .matchParentSize()
-                                .clickable { folderMenuExpanded = true }
-                        )
                     }
                     Text("目的地到着時の連絡方法")
                     Row(
@@ -1084,6 +1453,86 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     HorizontalDivider()
+                    Text("出発地（往復用・任意）", fontWeight = FontWeight.Bold)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = departureName,
+                            onValueChange = { departureName = it },
+                            label = { Text("出発地名") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        IconButton(
+                            onClick = {
+                                searchPlaceName(NameSearchTarget.DEPARTURE, departureName)
+                            },
+                            enabled = departureName.isNotBlank() && !nameSearching
+                        ) {
+                            if (nameSearching && nameSearchTarget == NameSearchTarget.DEPARTURE) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(Icons.Default.Search, contentDescription = "出発地名を検索")
+                            }
+                        }
+                        IconButton(
+                            onClick = { startVoiceInput(NameSearchTarget.DEPARTURE) },
+                            enabled = !nameSearching && voiceInputTarget == null
+                        ) {
+                            Icon(Icons.Default.Mic, contentDescription = "出発地名を音声入力")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = departureLatitude,
+                            onValueChange = { departureLatitude = it },
+                            label = { Text("出発地の緯度") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = departureLongitude,
+                            onValueChange = { departureLongitude = it },
+                            label = { Text("出発地の経度") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { showDepartureMapPicker = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Map, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("地図から出発地を選択")
+                    }
+                    OutlinedButton(
+                        onClick = { requestCurrentLocation(LocationInputTarget.DEPARTURE) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.MyLocation, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("現在地を出発地にする")
+                    }
+                    OutlinedButton(
+                        onClick = ::swapEndpoints,
+                        enabled = departureLatitude.toDoubleOrNull() != null &&
+                            departureLongitude.toDoubleOrNull() != null,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.SwapVert, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("行先と出発を入れ替える")
+                    }
+                    HorizontalDivider()
                     Text("途中経由駅", fontWeight = FontWeight.Bold)
                     waypoints.forEachIndexed { index, point ->
                         Card(modifier = Modifier.fillMaxWidth()) {
@@ -1097,15 +1546,82 @@ class MainActivity : ComponentActivity() {
                                         waypoints = waypoints.filterIndexed { itemIndex, _ -> itemIndex != index }
                                     }) { Icon(Icons.Default.Delete, "経由駅を削除") }
                                 }
-                                OutlinedTextField(point.name, { value ->
-                                    waypoints = waypoints.toMutableList().also { it[index] = point.copy(name = value) }
-                                }, label = { Text("駅名") }, singleLine = true)
-                                OutlinedTextField(point.latitude, { value ->
-                                    waypoints = waypoints.toMutableList().also { it[index] = point.copy(latitude = value) }
-                                }, label = { Text("緯度") }, singleLine = true)
-                                OutlinedTextField(point.longitude, { value ->
-                                    waypoints = waypoints.toMutableList().also { it[index] = point.copy(longitude = value) }
-                                }, label = { Text("経度") }, singleLine = true)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedTextField(
+                                        value = point.name,
+                                        onValueChange = { value ->
+                                            waypoints = waypoints.toMutableList().also {
+                                                it[index] = point.copy(name = value)
+                                            }
+                                        },
+                                        label = { Text("駅名") },
+                                        modifier = Modifier.weight(1f),
+                                        singleLine = true
+                                    )
+                                    IconButton(
+                                        onClick = {
+                                            searchPlaceName(
+                                                NameSearchTarget.WAYPOINT,
+                                                point.name,
+                                                index
+                                            )
+                                        },
+                                        enabled = point.name.isNotBlank() && !nameSearching
+                                    ) {
+                                        if (nameSearching &&
+                                            nameSearchTarget == NameSearchTarget.WAYPOINT &&
+                                            nameSearchWaypointIndex == index
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(20.dp),
+                                                strokeWidth = 2.dp
+                                            )
+                                        } else {
+                                            Icon(Icons.Default.Search, contentDescription = "経由駅名を検索")
+                                        }
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            startVoiceInput(
+                                                NameSearchTarget.WAYPOINT,
+                                                index
+                                            )
+                                        },
+                                        enabled = !nameSearching && voiceInputTarget == null
+                                    ) {
+                                        Icon(Icons.Default.Mic, contentDescription = "経由駅名を音声入力")
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    OutlinedTextField(
+                                        point.latitude,
+                                        { value ->
+                                            waypoints = waypoints.toMutableList().also {
+                                                it[index] = point.copy(latitude = value)
+                                            }
+                                        },
+                                        label = { Text("緯度") },
+                                        modifier = Modifier.weight(1f),
+                                        singleLine = true
+                                    )
+                                    OutlinedTextField(
+                                        point.longitude,
+                                        { value ->
+                                            waypoints = waypoints.toMutableList().also {
+                                                it[index] = point.copy(longitude = value)
+                                            }
+                                        },
+                                        label = { Text("経度") },
+                                        modifier = Modifier.weight(1f),
+                                        singleLine = true
+                                    )
+                                }
                                 OutlinedTextField(point.radius, { value ->
                                     waypoints = waypoints.toMutableList().also { it[index] = point.copy(radius = value.filter(Char::isDigit)) }
                                 }, label = { Text("到着判定距離 (m)") }, singleLine = true)
@@ -1145,13 +1661,17 @@ class MainActivity : ComponentActivity() {
                                 this@MainActivity,
                                 Manifest.permission.ACCESS_FINE_LOCATION
                             ) == PackageManager.PERMISSION_GRANTED
-                            if (granted) locationRequested = true
-                            else locationPermissionLauncher.launch(
-                                arrayOf(
-                                    Manifest.permission.ACCESS_FINE_LOCATION,
-                                    Manifest.permission.ACCESS_COARSE_LOCATION
+                            if (granted) {
+                                requestCurrentLocation(LocationInputTarget.DESTINATION)
+                            } else {
+                                locationInputTarget = LocationInputTarget.DESTINATION
+                                locationPermissionLauncher.launch(
+                                    arrayOf(
+                                        Manifest.permission.ACCESS_FINE_LOCATION,
+                                        Manifest.permission.ACCESS_COARSE_LOCATION
+                                    )
                                 )
-                            )
+                            }
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1174,6 +1694,20 @@ class MainActivity : ComponentActivity() {
                     }
                     if (lat !in -90.0..90.0 || lon !in -180.0..180.0) {
                         toast("緯度・経度の範囲が正しくありません")
+                        return@TextButton
+                    }
+                    val departureLat = departureLatitude.toDoubleOrNull()
+                    val departureLon = departureLongitude.toDoubleOrNull()
+                    val hasAnyDepartureInput = departureName.isNotBlank() ||
+                        departureLat != null || departureLon != null
+                    if (hasAnyDepartureInput && (departureLat == null || departureLon == null)) {
+                        toast("出発地の名前・緯度・経度を確認してください")
+                        return@TextButton
+                    }
+                    if (departureLat != null && departureLon != null &&
+                        (departureLat !in -90.0..90.0 || departureLon !in -180.0..180.0)
+                    ) {
+                        toast("出発地の緯度・経度の範囲が正しくありません")
                         return@TextButton
                     }
                     val savedWaypoints = waypoints.mapNotNull { point ->
@@ -1199,7 +1733,10 @@ class MainActivity : ComponentActivity() {
                             radiusMeters = rad,
                             folder = folder,
                             alertMethods = alertMethods,
-                            waypoints = savedWaypoints
+                            waypoints = savedWaypoints,
+                            departureName = departureName.trim(),
+                            departureLatitude = departureLat,
+                            departureLongitude = departureLon
                         )
                     )
                 }) { Text("保存") }
@@ -1207,34 +1744,35 @@ class MainActivity : ComponentActivity() {
             dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } }
         )
 
-        if (showDestinationSearch) {
+        if (nameSearchTarget != null) {
+            val searchTargetLabel = when (nameSearchTarget) {
+                NameSearchTarget.DESTINATION -> "目的地"
+                NameSearchTarget.DEPARTURE -> "出発地"
+                NameSearchTarget.WAYPOINT -> "経由駅"
+                null -> "場所"
+            }
             AlertDialog(
-                onDismissRequest = { showDestinationSearch = false },
-                title = { Text("「$destinationSearchQuery」の検索候補") },
+                onDismissRequest = ::closeNameSearch,
+                title = { Text("$searchTargetLabel「$nameSearchQuery」の検索候補") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        destinationSearchError?.let {
+                        nameSearchError?.let {
                             Text(it, color = MaterialTheme.colorScheme.error)
                         }
-                        if (destinationSearching) {
+                        if (nameSearching) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.Center
                             ) {
                                 CircularProgressIndicator()
                             }
-                        } else if (destinationSearchResults.isNotEmpty()) {
+                        } else if (nameSearchResults.isNotEmpty()) {
                             LazyColumn(modifier = Modifier.heightIn(max = 360.dp)) {
-                                items(destinationSearchResults) { result ->
+                                items(nameSearchResults) { result ->
                                     Column(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .clickable {
-                                                name = result.title
-                                                latitude = result.latitude.toString()
-                                                longitude = result.longitude.toString()
-                                                showDestinationSearch = false
-                                            }
+                                            .clickable { applyNameSearchResult(result) }
                                             .padding(vertical = 10.dp)
                                     ) {
                                         Text(
@@ -1257,7 +1795,7 @@ class MainActivity : ComponentActivity() {
                     }
                 },
                 confirmButton = {
-                    TextButton(onClick = { showDestinationSearch = false }) {
+                    TextButton(onClick = ::closeNameSearch) {
                         Text("閉じる")
                     }
                 }
@@ -1278,6 +1816,24 @@ class MainActivity : ComponentActivity() {
                         name = "地図で選択した場所"
                     }
                     showMapPicker = false
+                }
+            )
+        }
+        if (showDepartureMapPicker) {
+            MapPickerDialog(
+                initialLatitude = departureLatitude.toDoubleOrNull(),
+                initialLongitude = departureLongitude.toDoubleOrNull(),
+                isDeparture = true,
+                onDismiss = { showDepartureMapPicker = false },
+                onSelected = { lat, lon, placeName ->
+                    departureLatitude = lat.toString()
+                    departureLongitude = lon.toString()
+                    if (!placeName.isNullOrBlank()) {
+                        departureName = placeName
+                    } else if (departureName.isBlank()) {
+                        departureName = "地図で選択した出発地"
+                    }
+                    showDepartureMapPicker = false
                 }
             )
         }

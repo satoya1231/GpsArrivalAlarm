@@ -63,7 +63,7 @@ fun ArrivalMapView(
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val azimuth = rememberDeviceAzimuth()
+    val azimuth = rememberDeviceAzimuth(currentLocation)
     var mapViewRef by remember { mutableStateOf<MapView?>(null) }
     var destinationMarkerRef by remember { mutableStateOf<Marker?>(null) }
     var currentMarkerRef by remember { mutableStateOf<Marker?>(null) }
